@@ -1,0 +1,182 @@
+/* ── Variables ──────────────────────────────────────────────────── */
+:root {
+  --accent:  #2c7bb6;
+  --green:   #1a9641;
+  --red:     #d7191c;
+  --orange:  #fd7e14;
+  --muted:   #6c757d;
+  --bg-card: #f8f9fa;
+  --border:  #dee2e6;
+}
+
+/* ── Titre ──────────────────────────────────────────────────────── */
+#title-block-header {
+  background: linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);
+  color: white;
+  padding: 2.5rem 3rem 2rem;
+  border-bottom: 3px solid var(--accent);
+}
+#title-block-header .title    { font-size:2rem; font-weight:700; color:#fff; margin-bottom:.3rem; }
+#title-block-header .subtitle { font-size:1rem; color:#adb5bd; }
+#title-block-header .author,
+#title-block-header .date     { font-size:.85rem; color:#adb5bd; }
+
+/* ── Headings ───────────────────────────────────────────────────── */
+h1 { border-bottom: 2px solid var(--accent); padding-bottom:.4rem; color:#1a1a2e; }
+h2 { color: #16213e; }
+h3 { color: #0f3460; }
+
+/* ── Cartes instrument ──────────────────────────────────────────── */
+.instrument-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.1rem 1.3rem;
+  margin-bottom: 1rem;
+  transition: box-shadow .2s;
+}
+.instrument-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.08); }
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: .6rem;
+}
+.card-title { font-weight:700; font-size:1rem; color:#212529; }
+
+/* ── Badges catégorie ───────────────────────────────────────────── */
+.badge-cat {
+  font-size: .72rem;
+  font-weight: 600;
+  padding: .2rem .55rem;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.b-etf-monde { background:#d0ebff; color:#1864ab; }
+.b-etf-sect  { background:#d3f9d8; color:#1b5e20; }
+.b-oblig     { background:#fff3cd; color:#7d5a00; }
+.b-or        { background:#fff8dc; color:#8a6914; }
+.b-action    { background:#fce4ec; color:#880e4f; }
+
+/* ── Chips statistiques ─────────────────────────────────────────── */
+.card-stats { display:flex; flex-wrap:wrap; gap:.4rem; margin:.5rem 0; }
+.chip {
+  font-size:.78rem; padding:.15rem .55rem; border-radius:4px;
+  background:white; border:1px solid var(--border);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.chip-pos { color:var(--green);  border-color:var(--green); }
+.chip-neg { color:var(--red);    border-color:var(--red); }
+.chip-neu { color:var(--accent); border-color:var(--accent); }
+
+/* ── Description & pros/cons ────────────────────────────────────── */
+.card-desc { font-size:.88rem; color:#495057; margin-top:.5rem; line-height:1.55; }
+.pros-cons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .6rem;
+  margin-top: .7rem;
+  font-size: .82rem;
+}
+.pros {
+  background:#f0fff4;
+  border-left: 3px solid var(--green);
+  padding:.4rem .6rem;
+  border-radius: 0 4px 4px 0;
+}
+.cons {
+  background:#fff5f5;
+  border-left: 3px solid var(--red);
+  padding:.4rem .6rem;
+  border-radius: 0 4px 4px 0;
+}
+.pros strong, .cons strong {
+  display: block;
+  margin-bottom: .2rem;
+  font-size: .75rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+/* ── Badge score ─────────────────────────────────────────────────── */
+.score-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  font-weight: 800;
+  font-size: 1.1rem;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.sc-high { background:#d3f9d8; color:#1b5e20; }
+.sc-mid  { background:#fff3cd; color:#7d5a00; }
+.sc-low  { background:#fce4ec; color:#880e4f; }
+
+/* ── Portefeuilles ───────────────────────────────────────────────── */
+.port-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+.port-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.2rem;
+}
+.port-card h4 { margin-top:0; color:var(--accent); }
+.port-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: .3rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: .87rem;
+}
+.port-row:last-child { border-bottom: none; }
+.port-pct {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 1rem;
+}
+
+/* ── Disclaimer ──────────────────────────────────────────────────── */
+.disclaimer {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  font-size: .83rem;
+  color: #664d03;
+  margin-top: 2rem;
+}
+
+/* ── Grille 3 portefeuilles ─────────────────────────────────────── */
+.port-3col {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.2rem;
+  margin-top: 1rem;
+}
+
+/* ── Badges additionnels catégories ────────────────────────────── */
+.b-energie    { background: #fff0d8; color: #7a4500; }
+.b-finance    { background: #e8f4fd; color: #0a4e7a; }
+.b-luxe       { background: #f3e8fb; color: #5a1a82; }
+.b-pharma     { background: #e8fbf0; color: #1a5a32; }
+.b-boissons   { background: #f8ede8; color: #7a2a00; }
+.b-cosmetique { background: #fce8f8; color: #7a1a6e; }
+
+/* ── Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .port-3col { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .port-grid,
+  .pros-cons { grid-template-columns: 1fr; }
+  #title-block-header { padding: 1.5rem; }
+}

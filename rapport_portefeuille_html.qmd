@@ -1,0 +1,1726 @@
+---
+title: "Analyse de Portefeuille — Rapport Pédagogique"
+subtitle: "15 instruments — ETF & Actions françaises — Aide à la décision d'investissement"
+author: "Alban VIDELOUP"
+date: today
+lang: fr
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Navigation"
+    number-sections: true
+    number-depth: 3
+    code-fold: true
+    code-summary: "Voir le code R"
+    code-tools: true
+    self-contained: true
+    smooth-scroll: true
+    fig-align: center
+    fig-width: 12
+    fig-height: 6
+    highlight-style: github
+    css: styles_portefeuille.css
+    html-math-method: mathjax
+# Pour générer la version PDF ultérieurement, décommenter ci-dessous :
+# format:
+#   pdf:
+#     documentclass: article
+#     geometry: "margin=2cm"
+#     fontsize: 11pt
+#     include-in-header:
+#       text: |
+#         \usepackage{amsmath,amssymb,booktabs,float,xcolor}
+
+knitr:
+  opts_chunk:
+    echo: true       # Code VISIBLE — replié par défaut grâce à code-fold: true
+    warning: false
+    message: false
+    comment: ""
+    cache: false
+    fig.retina: 2
+    crop: false        # ← ajouter cette ligne
+    fig-crop: false
+
+execute:
+  echo: true
+  warning: false
+  message: false
+  freeze: false
+---
+
+```{r setup}
+# ══════════════════════════════════════════════════════════════════════
+# CHARGEMENT DES PACKAGES
+# Ordre critique : dplyr avant xts pour éviter le conflit sur last()
+# ══════════════════════════════════════════════════════════════════════
+suppressPackageStartupMessages({
+  library(dplyr)               # Manipulation de tableaux
+  library(tidyr)               # Transformation de données (pivot)
+  library(quantmod)            # Téléchargement Yahoo Finance + indicateurs OHLCV
+  library(xts)                 # Séries temporelles indexées par date
+  library(zoo)                 # Fenêtres glissantes (rollapply)
+  library(TTR)                 # Indicateurs techniques : RSI, MACD, BBands, SMA
+  library(PerformanceAnalytics)# Métriques financières : Sharpe, Sortino, VaR, CVaR
+  library(ggplot2)             # Graphiques statiques (majoritaire dans ce rapport)
+  library(patchwork)           # Assemblage / composition de graphiques ggplot2
+  library(ggrepel)             # Labels non superposés dans les scatter plots
+  library(scales)              # Formatage des axes (%, €, k, M)
+  library(plotly)              # Graphiques interactifs (frontière efficiente, etc.)
+  library(DT)                  # Tables HTML interactives avec tri/filtre
+  library(knitr)               # kable() pour tableaux dans les boucles résultats
+  library(moments)             # Asymétrie (skewness) et excès de kurtosis
+})
+
+# xts::last() doit primer sur dplyr::last() (conflit de namespace)
+last  <- xts::last
+first <- xts::first
+```
+
+```{r theme-finance}
+# ══════════════════════════════════════════════════════════════════════
+# THÈME GGPLOT2 PERSONNALISÉ — appliqué à tous les graphiques statiques
+# ══════════════════════════════════════════════════════════════════════
+theme_finance <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title       = element_text(hjust = 0.5, face = "bold",
+                                      size = base_size + 2, color = "#1a1a2e"),
+      plot.subtitle    = element_text(hjust = 0.5, color = "#6c757d",
+                                      size = base_size - 1, margin = margin(b = 6)),
+      plot.caption     = element_text(color = "#adb5bd", size = base_size - 2, hjust = 1),
+      axis.title       = element_text(size = base_size - 1, color = "#495057"),
+      axis.text        = element_text(size = base_size - 2, color = "#6c757d"),
+      panel.grid.major = element_line(color = "#e9ecef", linetype = "dashed",
+                                      linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background  = element_rect(fill = "white", color = NA),
+      plot.margin      = margin(8, 12, 8, 8, "pt"),
+      legend.position  = "bottom",
+      legend.text      = element_text(size = base_size - 2),
+      legend.title     = element_text(size = base_size - 1, face = "bold"),
+      legend.background = element_rect(fill = "white", color = NA),
+      strip.text       = element_text(face = "bold", color = "#1a1a2e",
+                                      size = base_size),
+      strip.background = element_rect(fill = "#f1f3f5", color = NA)
+    )
+}
+
+# Palette de 15 couleurs distinctes — cohérente sur l'ensemble du rapport
+PAL <- c(
+  "#2c7bb6","#d7191c","#1a9641","#fdae61","#74add1",
+  "#762a83","#f4a582","#018571","#80cdc1","#dfc27d",
+  "#a6611a","#4575b4","#e34a33","#b2abd2","#f46d43"
+)
+```
+
+```{r params}
+# ══════════════════════════════════════════════════════════════════════
+# PARAMÈTRES GLOBAUX & CATALOGUE DES INSTRUMENTS
+# ══════════════════════════════════════════════════════════════════════
+
+# Indices macro de comparaison
+IDX_CAC   <- "^FCHI"   # CAC 40 — indice phare de la Bourse de Paris
+IDX_DAX   <- "^GDAXI"  # DAX 40 — indice allemand
+IDX_SP500 <- "^GSPC"   # S&P 500 — indice américain (référence mondiale)
+IDX_VIX   <- "^VIX"    # VIX — baromètre de la volatilité implicite (« indice de la peur »)
+
+# Période d'analyse : début 2008 pour capturer la Grande Crise Financière
+DATE_DEBUT <- "2008-01-01"
+DATE_FIN   <- Sys.Date()
+
+# Taux sans risque annualisé (approximation OAT 10 ans France, 2025)
+RF_AN    <- 0.033
+# Conversion en taux journalier : formule des intérêts composés
+# rf_daily = (1 + rf_annuel)^(1/252) - 1   [252 = jours de bourse/an]
+RF_DAILY <- (1 + RF_AN)^(1/252) - 1
+
+# ── Catalogue des 15 instruments ──────────────────────────────────────
+# CRITÈRE DE SÉLECTION : disponibilité confirmée sur Yahoo Finance via
+# quantmod::getSymbols. Tous libellés en EUR (Euronext Paris) → pas de
+# biais de change dans les comparaisons.
+# ──────────────────────────────────────────────────────────────────────
+CATALOGUE <- list(
+
+  # ── ETF (5) ── PEA sauf SGLD ─────────────────────────────────────
+  list(ticker="CW8.PA", nom="Amundi MSCI World Swap", cat="ETF Monde",
+       pea=TRUE, ter=0.12, conv=5, rsk=3,
+       desc=paste0("Cœur de portefeuille mondial via swap synthétique. Réplique le MSCI World ",
+                   "covering ~1 500 titres dans 23 pays développés. Concentration USA ~70 %. ",
+                   "TER imbattable à 0,12 %. Meilleur ETF monde éligible PEA en termes de coût."),
+       pros=c("TER 0,12 % (imbattable)","Éligible PEA","Liquidité très élevée"),
+       cons=c("Risque de contrepartie swap","Concentration USA ~70 %","Historique ~10 ans")),
+
+  list(ticker="PANX.PA", nom="Amundi Nasdaq-100", cat="ETF Technologie",
+       pea=TRUE, ter=0.23, conv=4, rsk=5,
+       desc=paste0("Exposition aux 100 plus grandes sociétés non-financières du Nasdaq. ",
+                   "Dominé par les géants tech (Apple, Microsoft, Nvidia, Meta ~50 %). ",
+                   "Performances historiques exceptionnelles (+15 %/an sur 10 ans) mais volatilité élevée."),
+       pros=c("Performance historique top","Éligible PEA","Exposition tech premium"),
+       cons=c("Très concentré secteur tech","Volatilité ~20–25 %","Sensible aux taux longs")),
+
+  list(ticker="PUST.PA", nom="Amundi S&P 500 II", cat="ETF Amérique",
+       pea=TRUE, ter=0.15, conv=4, rsk=3,
+       desc=paste0("Les 500 plus grandes capitalisations américaines — secteurs tech, santé, finance, ",
+                   "industrie et énergie. Plus diversifié que le Nasdaq. ",
+                   "L'indice américain de référence, éligible PEA via swap. TER 0,15 %."),
+       pros=c("Diversification sectorielle US","Éligible PEA","TER 0,15 %"),
+       cons=c("Concentration géographique USA","Pas de small/mid caps","Valorisation élevée")),
+
+  list(ticker="PAEEM.PA", nom="Amundi MSCI Emergents", cat="ETF Émergents",
+       pea=TRUE, ter=0.20, conv=3, rsk=4,
+       desc=paste0("Marchés émergents : Chine ~30 %, Inde ~20 %, Taïwan ~18 %, Corée du Sud ~13 %. ",
+                   "Valorisations attractives (P/E ~12x vs 25x pour les développés). ",
+                   "Diversification géographique réelle mais risque géopolitique à intégrer."),
+       pros=c("P/E attractif ~12x","Éligible PEA","Croissance structurelle LT"),
+       cons=c("Risque géopolitique Chine","Volatilité plus haute","Risque réglementaire")),
+
+  list(ticker="SGLD.PA", nom="Invesco Physical Gold ETC", cat="Or",
+       pea=FALSE, ter=0.12, conv=4, rsk=3,
+       desc=paste0("Or physique certifié LBMA, stocké dans des coffres sécurisés. ",
+                   "Valeur refuge millénaire : corrélation quasi nulle (voire négative en crise) aux actions. ",
+                   "TER minimal à 0,12 %. Protège l'inflation et les crises systémiques."),
+       pros=c("Corrélation ~0 aux actions","Valeur refuge prouvée","TER 0,12 %"),
+       cons=c("Non éligible PEA","Aucun dividende","Volatilité ~16 %/an")),
+
+  # ── Actions françaises (10) — toutes PEA, historique ≥ 15 ans ─────
+  list(ticker="AI.PA", nom="Air Liquide", cat="Industrie",
+       pea=TRUE, ter=NA, conv=5, rsk=2,
+       desc=paste0("N°1 mondial des gaz industriels et médicaux. Modèle de revenu récurrent exceptionnel ",
+                   "(contrats 10–20 ans indexés sur la production). Aristocrate du dividende européen : ",
+                   "hausse ininterrompue depuis plus de 20 ans. Mégatrend hydrogène vert."),
+       pros=c("Aristocrate du dividende","Modèle récurrent","Mégatrend H₂ vert"),
+       cons=c("P/E ~25x (premium)","Rendement div. ~2 %","Sensible aux coûts énergie")),
+
+  list(ticker="MC.PA", nom="LVMH", cat="Luxe",
+       pea=TRUE, ter=NA, conv=4, rsk=3,
+       desc=paste0("N°1 mondial du luxe — 75 maisons iconiques (Louis Vuitton, Dior, Tiffany, Moët…). ",
+                   "1re capitalisation du CAC 40. Pricing power exceptionnel dans tous les cycles. ",
+                   "Principal risque court terme : exposition Chine ~35 % du chiffre d'affaires."),
+       pros=c("N°1 luxe mondial","75 marques diversifiées","Pricing power"),
+       cons=c("Exposition Chine ~35 %","Cyclicité partielle","Valorisation élevée en pic")),
+
+  list(ticker="OR.PA", nom="L'Oréal", cat="Cosmétiques",
+       pea=TRUE, ter=NA, conv=4, rsk=2,
+       desc=paste0("Leader mondial des cosmétiques (38 marques mondiales, présence dans 150 pays). ",
+                   "L'« effet rouge à lèvres » : résilience cyclique prouvée lors de toutes les crises. ",
+                   "Croissance organique régulière +6–8 %/an. ROE ~18 %. P/E ~35x."),
+       pros=c("Résilience cyclique prouvée","Croissance régulière","150 pays"),
+       cons=c("P/E élevé ~35x","Dividende ~1,5 %","Exposition USD/CNY")),
+
+  list(ticker="SAN.PA", nom="Sanofi", cat="Pharmacie",
+       pea=TRUE, ter=NA, conv=4, rsk=2,
+       desc=paste0("1re pharma de la zone euro. Blockbuster Dupixent (dermatite, asthme) : ",
+                   ">15 Md€ de ventes annuelles en forte croissance. Pipeline R&D diversifié. ",
+                   "Dividende régulier ~3,5 %. P/E attractif ~16x. Profil défensif."),
+       pros=c("Dupixent (blockbuster)","Dividende ~3,5 %","P/E attractif ~16x"),
+       cons=c("Dépendance Dupixent ~40 %","Risque R&D","Concurrence biosimilaires")),
+
+  list(ticker="TTE.PA", nom="TotalEnergies", cat="Énergie",
+       pea=TRUE, ter=NA, conv=3, rsk=3,
+       desc=paste0("Supermajor pétrolier en transition énergétique. Dividende élevé ~5–6 % ",
+                   "et programme massif de rachats d'actions. Stratégie LT sur le GNL et les ENR. ",
+                   "Cash-flow très élevé (~25 Md€/an). Exposé aux prix du pétrole et du gaz."),
+       pros=c("Dividende ~5–6 %","Transition énergétique","Cash-flow record"),
+       cons=c("Exposé prix pétrole","Risque transition accélérée","Critique ESG")),
+
+  list(ticker="BNP.PA", nom="BNP Paribas", cat="Finance",
+       pea=TRUE, ter=NA, conv=3, rsk=4,
+       desc=paste0("1re banque de la zone euro par total d'actifs (~2 800 Md€). ",
+                   "Diversification remarquable (banque de détail, CIB, gestion d'actifs). ",
+                   "Valorisation décotée P/B ~0,7. Dividende ~7 %, rachats d'actions importants."),
+       pros=c("P/B ~0,7 (très décoté)","Dividende ~7 %","N°1 zone euro"),
+       cons=c("Sensible au cycle éco","Régulation contraignante","Risque souverain")),
+
+  list(ticker="KER.PA", nom="Kering", cat="Luxe",
+       pea=TRUE, ter=NA, conv=3, rsk=4,
+       desc=paste0("Maison mère de Gucci, Saint Laurent, Bottega Veneta, Balenciaga. ",
+                   "Fortement dépendant de Gucci (~50 % du ROP). Restructuration en cours. ",
+                   "Concurrence directe avec LVMH. Décote de valorisation notable vs. LVMH."),
+       pros=c("Portfolio de marques premium","Décote vs. LVMH","Potentiel rebond Gucci"),
+       cons=c("Dépendance Gucci ~50 %","Forte exposition Chine","Gucci en restructuration")),
+
+  list(ticker="DSY.PA", nom="Dassault Systèmes", cat="Technologie",
+       pea=TRUE, ter=NA, conv=3, rsk=3,
+       desc=paste0("Leader mondial des logiciels de conception 3D (CATIA, SolidWorks, 3DEXPERIENCE). ",
+                   "Clients dans 11 industries verticales. Transition vers le SaaS en cours. ",
+                   "Revenus récurrents >30 %. P/E élevé ~35–40x justifié par la qualité des actifs."),
+       pros=c("Leader logiciels 3D","Revenus récurrents","R&D ~20 % du CA"),
+       cons=c("P/E ~35–40x","Transition SaaS en cours","Sensible au cycle industriel")),
+
+  list(ticker="RI.PA", nom="Pernod Ricard", cat="Boissons",
+       pea=TRUE, ter=NA, conv=3, rsk=3,
+       desc=paste0("N°2 mondial des spiritueux (Absolut, Jameson, Chivas, Martell, Malibu). ",
+                   "Business model défensif avec pricing power. Forte exposition Chine ~30 % des ventes. ",
+                   "Dividende régulier ~3 %. Période difficile 2023–2024 due au déstockage en Asie."),
+       pros=c("Portfolio de marques premium","Pricing power","Dividende ~3 %"),
+       cons=c("Exposition Chine ~30 %","Déstockage 2023–2024","Endettement élevé")),
+
+  list(ticker="CA.PA", nom="Carrefour", cat="Distribution",
+       pea=TRUE, ter=NA, conv=2, rsk=3,
+       desc=paste0("2e distributeur mondial (14 000+ magasins dans 40 pays). ",
+                   "Performance boursière décevante sur 10 ans. Marges structurellement faibles. ",
+                   "Concurrence intense (Lidl, Aldi, Amazon). Dividende ~5 % mais croissance limitée."),
+       pros=c("P/E ~9x (très bas)","Dividende ~5 %","Diversification géographique"),
+       cons=c("Performance historique décevante","Marges faibles","Concurrence e-commerce"))
+)
+
+# ── Vecteurs dérivés ──────────────────────────────────────────────────
+PTFL_TICKERS <- sapply(CATALOGUE, `[[`, "ticker")
+
+# Noms courts pour les graphiques (espace limité)
+NOMS <- setNames(
+  c("CW8","PANX","PUST","PAEEM","SGLD",
+    "Air Liq.","LVMH","L'Oréal","Sanofi",
+    "TotalE","BNP","Kering","Dassault","P.Ricard","Carrefour"),
+  PTFL_TICKERS
+)
+
+# Classes CSS pour les badges de catégorie (définis dans styles_portefeuille.css)
+BADGE_CLASS <- c(
+  "ETF Monde"="b-etf-monde","ETF Technologie"="b-etf-sect",
+  "ETF Amérique"="b-etf-sect","ETF Émergents"="b-etf-monde",
+  "Or"="b-or","Industrie"="b-action","Luxe"="b-action",
+  "Cosmétiques"="b-action","Pharmacie"="b-action","Énergie"="b-action",
+  "Finance"="b-action","Technologie"="b-etf-sect",
+  "Boissons"="b-action","Distribution"="b-action"
+)
+```
+
+```{r helpers}
+# ══════════════════════════════════════════════════════════════════════
+# FONCTIONS UTILITAIRES — Graphiques et calculs
+# ══════════════════════════════════════════════════════════════════════
+
+# ── Rebaser une série à 100 au départ ────────────────────────────────
+rebase100 <- function(r) cumprod(1 + na.fill(r, 0)) * 100
+
+# ── Graphiques de cours sur différents horizons temporels ─────────────
+# Génère une liste nommée de graphiques ggplot2 (un par horizon disponible)
+make_horizon_plots <- function(prices_xts, ticker_name,
+                                horizons = c(15, 10, 5, 1)) {
+  plots <- list()
+  horizon_labels <- c("15 ans","10 ans","5 ans","1 an")
+
+  for (i in seq_along(horizons)) {
+    y     <- horizons[i]
+    start <- Sys.Date() - y * 365
+    w     <- tryCatch(window(prices_xts, start = start), error = function(e) NULL)
+    if (is.null(w) || nrow(w) < 20) next   # Horizon non disponible
+
+    df        <- data.frame(date = as.Date(index(w)), price = as.numeric(w))
+    df$rebased <- df$price / df$price[1] * 100
+    perf       <- tail(df$rebased, 1) - 100
+    col        <- if (perf >= 0) "#1a9641" else "#d7191c"
+
+    # Ruban vert au-dessus de 100, ruban rouge en dessous
+    df$y_up   <- pmax(df$rebased, 100)
+    df$y_down <- pmin(df$rebased, 100)
+
+    p <- ggplot(df, aes(x = date)) +
+      geom_ribbon(aes(ymin = 100, ymax = y_up),   fill = "#1a9641", alpha = 0.18) +
+      geom_ribbon(aes(ymin = y_down, ymax = 100), fill = "#d7191c", alpha = 0.18) +
+      geom_line(aes(y = rebased), color = col, linewidth = 0.85) +
+      geom_hline(yintercept = 100, linetype = "dashed",
+                 color = "grey50", linewidth = 0.4) +
+      labs(
+        title    = horizon_labels[i],
+        subtitle = sprintf("Perf. totale : %+.1f%% | Début : %s",
+                           perf, format(min(df$date), "%d/%m/%Y")),
+        x = NULL, y = "Base 100"
+      ) +
+      scale_x_date(date_labels = if (y >= 10) "%Y" else "%b %Y") +
+      theme_finance(base_size = 10)
+
+    plots[[horizon_labels[i]]] <- p
+  }
+  plots
+}
+
+# ── Bandes de Bollinger (20 périodes, ±2σ) ───────────────────────────
+make_bollinger_chart <- function(prices_xts, ticker_name, n_months = 14) {
+  start <- Sys.Date() - n_months * 31
+  w     <- tryCatch(window(prices_xts, start = start), error = function(e) prices_xts)
+  if (is.null(w) || nrow(w) < 50) return(NULL)
+
+  df <- data.frame(date = as.Date(index(w)), price = as.numeric(w))
+  bb <- TTR::BBands(df$price, n = 20, sd = 2)
+  df$sma   <- as.numeric(bb[, "mavg"])
+  df$upper <- as.numeric(bb[, "up"])
+  df$lower <- as.numeric(bb[, "dn"])
+  df       <- na.omit(df)
+
+  ggplot(df, aes(x = date)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), fill = "#74add1", alpha = 0.25) +
+    geom_line(aes(y = upper), color = "#2c7bb6", linewidth = 0.45, linetype = "dashed") +
+    geom_line(aes(y = lower), color = "#2c7bb6", linewidth = 0.45, linetype = "dashed") +
+    geom_line(aes(y = sma),   color = "#d7191c", linewidth = 0.65) +
+    geom_line(aes(y = price), color = "#1a1a2e", linewidth = 0.9) +
+    labs(
+      title    = sprintf("Bandes de Bollinger — %s (BB-20, ±2σ)", ticker_name),
+      subtitle = "Ligne noire : cours | Rouge : SMA-20 | Bleu : ±2 écarts-types",
+      x = NULL, y = "Prix ajusté (€)"
+    ) +
+    theme_finance(base_size = 10)
+}
+
+# ── RSI 14 jours ──────────────────────────────────────────────────────
+make_rsi_chart <- function(prices_xts, ticker_name, n_months = 14) {
+  start <- Sys.Date() - n_months * 31
+  w     <- tryCatch(window(prices_xts, start = start), error = function(e) prices_xts)
+  if (is.null(w) || nrow(w) < 50) return(NULL)
+
+  df       <- data.frame(date = as.Date(index(w)), price = as.numeric(w))
+  df$rsi   <- as.numeric(TTR::RSI(df$price, n = 14))
+  df       <- na.omit(df)
+
+  # Zones colorées : survente < 30, surachat > 70
+  df$zone_buy  <- pmin(df$rsi, 30)
+  df$zone_sell <- pmax(df$rsi, 70)
+
+  ggplot(df, aes(x = date, y = rsi)) +
+    geom_ribbon(aes(ymin = 0,  ymax = zone_buy),  fill = "#1a9641", alpha = 0.25) +
+    geom_ribbon(aes(ymin = zone_sell, ymax = 100), fill = "#d7191c", alpha = 0.25) +
+    geom_line(color = "#2c7bb6", linewidth = 0.8) +
+    geom_hline(yintercept = 70, linetype = "dashed", color = "#d7191c", linewidth = 0.6) +
+    geom_hline(yintercept = 30, linetype = "dashed", color = "#1a9641", linewidth = 0.6) +
+    geom_hline(yintercept = 50, linetype = "dotted", color = "grey50", linewidth = 0.4) +
+    annotate("text", x = min(df$date), y = 72, label = "Surachat", hjust = 0,
+             size = 2.8, color = "#d7191c") +
+    annotate("text", x = min(df$date), y = 28, label = "Survente", hjust = 0,
+             size = 2.8, color = "#1a9641") +
+    scale_y_continuous(limits = c(0, 100), breaks = c(0, 30, 50, 70, 100)) +
+    labs(title = sprintf("RSI 14 jours — %s", ticker_name),
+         x = NULL, y = "RSI") +
+    theme_finance(base_size = 10)
+}
+
+# ── Heatmap des rendements mensuels ───────────────────────────────────
+make_monthly_heatmap <- function(prices_xts, ticker_name, max_years = 12) {
+  start  <- Sys.Date() - max_years * 365
+  w      <- tryCatch(window(prices_xts, start = start), error = function(e) prices_xts)
+  if (is.null(w) || nrow(w) < 24) return(NULL)
+
+  m_ret  <- tryCatch(monthlyReturn(w, type = "arithmetic"), error = function(e) NULL)
+  if (is.null(m_ret) || nrow(m_ret) < 6) return(NULL)
+
+  df         <- data.frame(date = as.Date(index(m_ret)), ret = as.numeric(m_ret) * 100)
+  df$year    <- format(df$date, "%Y")
+  df$month   <- factor(
+    as.integer(format(df$date, "%m")), levels = 1:12,
+    labels = c("Jan","Fév","Mar","Avr","Mai","Jun",
+               "Jul","Aoû","Sep","Oct","Nov","Déc")
+  )
+  # Limites symétriques à partir du 95e percentile (évite qu'un krach écrase tout)
+  lim        <- max(5, quantile(abs(df$ret), 0.95, na.rm = TRUE))
+  df$txt_col <- ifelse(abs(df$ret) > lim * 0.55, "white", "grey20")
+
+  ggplot(df, aes(x = month, y = year, fill = ret)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = sprintf("%+.1f", ret), color = txt_col), size = 2.6) +
+    scale_fill_gradient2(low = "#d7191c", mid = "white", high = "#1a9641",
+                         midpoint = 0, name = "Rdt (%)",
+                         limits = c(-lim, lim), oob = scales::squish) +
+    scale_color_identity() +
+    labs(
+      title    = sprintf("Rendements mensuels — %s (%%)", ticker_name),
+      subtitle = sprintf("Depuis %s | Vert = positif · Rouge = négatif",
+                         format(min(df$date), "%Y")),
+      x = NULL, y = NULL
+    ) +
+    theme_finance(base_size = 10) +
+    theme(panel.grid = element_blank(),
+          legend.position = "right",
+          legend.key.height = unit(0.9, "cm"))
+}
+
+# ── Score global /10 ─────────────────────────────────────────────────
+# Composite : 40 % Sharpe + 30 % rendement + 20 % volatilité + 10 % max DD
+score_tk <- function(tk) {
+  r <- tryCatch(na.omit(all_ptfl[, tk]), error = function(e) NULL)
+  if (is.null(r) || length(r) < 20) return(NA_real_)
+  ra <- as.numeric(Return.annualized(r, scale = 252))
+  va <- as.numeric(StdDev.annualized(r, scale = 252))
+  md <- as.numeric(maxDrawdown(r))
+  sr <- (ra - RF_AN) / va
+  round(min(10, max(0, (sr + .5) * 7)) * .40 +
+        min(10, max(0, ra * 60))       * .30 +
+        max(0, 10 - va * 30)           * .20 +
+        max(0, 10 - md * 15)           * .10, 1)
+}
+```
+
+```{r download}
+# ══════════════════════════════════════════════════════════════════════
+# TÉLÉCHARGEMENT DES DONNÉES (Yahoo Finance via quantmod)
+# getSymbols retourne les données OHLCV ajustées (dividendes + splits)
+# ══════════════════════════════════════════════════════════════════════
+dl <- function(tk, from = DATE_DEBUT) {
+  # Nettoie le ticker pour en faire un nom de variable R valide
+  clean <- gsub("[\\^=\\.\\-]", "", tk)
+  tryCatch({
+    obj <- getSymbols(tk, src = "yahoo", from = from, to = DATE_FIN,
+                      auto.assign = FALSE, warnings = FALSE)
+    assign(clean, obj, envir = globalenv())
+  }, error = function(e) {
+    message(sprintf("  ⚠ Impossible de télécharger %s : %s", tk, conditionMessage(e)))
+    NULL
+  })
+}
+sym <- function(tk) gsub("[\\^=\\.\\-]", "", tk)
+
+# Téléchargement des indices macro (historique long pour la comparaison)
+for (tk in c(IDX_CAC, IDX_DAX, IDX_SP500)) dl(tk, from = "2000-01-01")
+dl(IDX_VIX, from = "2008-01-01")
+
+# Téléchargement des 15 instruments du portefeuille
+for (tk in PTFL_TICKERS) dl(tk)
+```
+
+```{r build}
+# ══════════════════════════════════════════════════════════════════════
+# CONSTRUCTION DES SÉRIES DE RENDEMENTS
+# ══════════════════════════════════════════════════════════════════════
+
+# Récupération des objets indices
+cac   <- tryCatch(get(sym(IDX_CAC)),   error = function(e) NULL)
+dax   <- tryCatch(get(sym(IDX_DAX)),   error = function(e) NULL)
+sp500 <- tryCatch(get(sym(IDX_SP500)), error = function(e) NULL)
+vix   <- tryCatch(get(sym(IDX_VIX)),   error = function(e) NULL)
+
+# Récupération des objets portefeuille
+ptfl_list <- setNames(
+  lapply(PTFL_TICKERS, function(tk) tryCatch(get(sym(tk)), error = function(e) NULL)),
+  PTFL_TICKERS
+)
+ptfl_list <- Filter(Negate(is.null), ptfl_list)
+
+# Calcul des rendements logarithmiques journaliers
+# log(P_t / P_{t-1}) = log(1 + r_t) ≈ r_t pour de petites variations
+rets_l <- lapply(names(ptfl_list), function(nm) {
+  r <- tryCatch(dailyReturn(Ad(ptfl_list[[nm]]), type = "log"), error = function(e) NULL)
+  if (!is.null(r)) colnames(r) <- nm
+  r
+})
+rets_l   <- Filter(Negate(is.null), rets_l)
+# Fusion sur les dates communes (inner join) et suppression des NA
+all_ptfl <- na.omit(Reduce(function(a, b) merge(a, b, join = "inner"), rets_l))
+
+# Fenêtres temporelles de calcul
+ptfl_w <- window(all_ptfl, start = as.Date(DATE_DEBUT))
+```
+
+---
+
+# Introduction & Théorie {.unnumbered}
+
+::: {.callout-note}
+## À propos de ce rapport
+
+Ce document analyse **`r length(CATALOGUE)` instruments financiers** couvrant ETF (Monde, Technologie, Amérique, Émergents), un ETC Or et des actions françaises du CAC 40/SBF 120.
+
+**`r sum(sapply(CATALOGUE, "[[", "pea"))` instruments sur `r length(CATALOGUE)`** sont éligibles au PEA.
+
+**Sources :** Yahoo Finance via `quantmod` · **Période :** `r format(as.Date(DATE_DEBUT), "%d/%m/%Y")` → `r format(DATE_FIN, "%d/%m/%Y")` · **Taux sans risque :** `r RF_AN*100` %
+
+**Note PDF :** Ce rapport est conçu pour l'HTML (graphiques interactifs, tables filtrables). Pour la version PDF, les graphiques Plotly seront remplacés par des équivalents ggplot2 statiques.
+:::
+
+## Les indicateurs fondamentaux de performance
+
+Avant d'analyser chaque instrument, voici les définitions précises des métriques utilisées dans ce rapport.
+
+### Rendement annualisé
+
+Le rendement annualisé convertit une performance sur $N$ jours de bourse en équivalent annuel via la loi de capitalisation composée :
+
+$$R_{\text{ann}} = \left(\prod_{t=1}^{N}(1+r_t)\right)^{252/N} - 1$$
+
+où $r_t$ est le rendement journalier et 252 est le nombre conventionnel de jours de bourse par an.
+
+::: {.callout-tip}
+**Interprétation :** Un rendement annualisé de 8 % signifie qu'un capital de 100 € devient $100 \times 1{,}08^{10} \approx 215$ € en 10 ans.
+:::
+
+### Volatilité (risque)
+
+La volatilité annualisée mesure la dispersion des rendements journaliers, scalée à l'année :
+
+$$\sigma_{\text{ann}} = \sqrt{252 \cdot \frac{1}{N-1}\sum_{t=1}^{N}(r_t - \bar{r})^2}$$
+
+| Volatilité | Profil de risque |
+|-----------|----------------|
+| < 10 % | Faible (obligations, monétaire) |
+| 10–20 % | Modéré (ETF diversifiés) |
+| 20–30 % | Élevé (actions individuelles, Nasdaq) |
+| > 30 % | Très élevé (small caps, cryptos) |
+
+### Ratio de Sharpe — L'indicateur roi
+
+Le ratio de Sharpe, développé par William F. Sharpe (Prix Nobel 1990), mesure le **rendement excédentaire par unité de risque total** :
+
+$$S = \frac{R_{\text{ann}} - R_f}{\sigma_{\text{ann}}}$$
+
+où $R_f$ est le **taux sans risque** (ici : `r RF_AN*100` %, approximation de l'OAT 10 ans française).
+
+**Intuition :** Si deux actifs ont le même rendement, celui avec la plus faible volatilité a le meilleur Sharpe. Le Sharpe permet de *comparer équitablement* des actifs de risques différents.
+
+| Ratio de Sharpe | Appréciation |
+|----------------|-------------|
+| > 1,0 | Excellent |
+| 0,5 – 1,0 | Bon |
+| 0,0 – 0,5 | Acceptable |
+| < 0,0 | Négatif (perd vs. l'actif sans risque) |
+
+### Ratio de Sortino — Version asymétrique du Sharpe
+
+Le ratio de Sortino ne pénalise que la **volatilité à la baisse** ($\sigma_d$), contrairement au Sharpe qui pénalise toute volatilité — y compris les hausses :
+
+$$\text{So} = \frac{R_{\text{ann}} - R_f}{\sigma_d} \quad \text{où} \quad \sigma_d = \sqrt{252 \cdot \frac{1}{N}\sum_{t=1}^{N}\min(r_t - R_f/252,\; 0)^2}$$
+
+::: {.callout-tip}
+**Quand préférer le Sortino ?** Pour les actifs avec des distributions asymétriques (ex. : actions de croissance qui montent lentement mais chutent brutalement). Un Sortino bien supérieur au Sharpe signale que la volatilité est majoritairement « haussière ».
+:::
+
+### Maximum Drawdown — La plus grande chute
+
+Le Max Drawdown (MDD) quantifie la **pire perte subie entre un pic et un creux** dans l'historique :
+
+$$\text{MDD} = \max_{\tau \leq t \in [0,T]} \frac{V_\tau - V_t}{V_\tau} \times 100\;\%$$
+
+où $V_t$ est la valeur du portefeuille à la date $t$ et $V_\tau$ son maximum atteint avant $t$.
+
+::: {.callout-warning}
+**Pourquoi c'est crucial :** Un MDD de -50 % exige un rebond de +100 % pour revenir au niveau initial. L'asymétrie pertes/gains est une réalité mathématique incontournable.
+:::
+
+| Max Drawdown | Interprétation |
+|-------------|----------------|
+| < 15 % | Très défensif |
+| 15–30 % | Modéré |
+| 30–50 % | Risqué |
+| > 50 % | Extrêmement risqué |
+
+### VaR et CVaR — La gestion des risques extrêmes
+
+La **Value at Risk** au niveau $\alpha$ (95 % ici) est la perte maximale sur une journée qui ne sera pas dépassée dans 95 % des cas :
+
+$$\text{VaR}_{95\%} = -\text{Quantile}_{5\%}(\{r_t\})$$
+
+La **CVaR** (ou Expected Shortfall, ES) va plus loin : c'est la perte **moyenne** dans les 5 % de pires scénarios :
+
+$$\text{CVaR}_{95\%} = -\mathbb{E}\!\left[r_t \mid r_t \leq -\text{VaR}_{95\%}\right]$$
+
+::: {.callout-tip}
+**Exemple concret :** Si VaR 95 % = 2 % et CVaR 95 % = 3,5 %, cela signifie que sur une journée de marché normale, vous ne perdrez pas plus de 2 % (95 % du temps), mais si vous vous retrouvez dans les 5 % de mauvais jours, vous perdrez en moyenne 3,5 %.
+:::
+
+## La Théorie Moderne du Portefeuille (Markowitz, 1952)
+
+Harry Markowitz publie en 1952 son article fondateur « Portfolio Selection ». L'idée centrale : **un portefeuille bien diversifié peut obtenir un meilleur ratio rendement/risque que n'importe quel actif pris individuellement**.
+
+### La frontière efficiente
+
+Pour un ensemble de $n$ actifs de rendements espérés $\boldsymbol{\mu}$ et de matrice de covariance $\boldsymbol{\Sigma}$, le **rendement et la volatilité d'un portefeuille** de pondérations $\mathbf{w}$ sont :
+
+$$R_p = \mathbf{w}^\top \boldsymbol{\mu} \qquad \sigma_p = \sqrt{\mathbf{w}^\top \boldsymbol{\Sigma}\, \mathbf{w}}$$
+
+Un portefeuille est dit **efficient** s'il maximise le rendement pour un niveau de risque donné. L'ensemble de ces portefeuilles forme la **frontière efficiente**.
+
+### Le portefeuille de variance minimale (MVP)
+
+$$\min_{\mathbf{w}}\; \mathbf{w}^\top \boldsymbol{\Sigma}\, \mathbf{w} \quad \text{s.c.} \quad \mathbf{w}^\top \mathbf{1} = 1,\; w_i \geq 0$$
+
+### Le portefeuille à Sharpe maximal (MSP)
+
+$$\max_{\mathbf{w}}\; \frac{\mathbf{w}^\top \boldsymbol{\mu} - R_f}{\sqrt{\mathbf{w}^\top \boldsymbol{\Sigma}\, \mathbf{w}}} \quad \text{s.c.} \quad \mathbf{w}^\top \mathbf{1} = 1,\; w_i \geq 0$$
+
+::: {.callout-note}
+**Limite de la théorie :** Markowitz suppose des rendements normalement distribués et des corrélations stables dans le temps — deux hypothèses souvent violées en pratique (queues épaisses, corrélations montant en crise). Nos simulations Monte Carlo et l'analyse des corrélations glissantes illustreront ces limites.
+:::
+
+---
+
+# Panorama des marchés
+
+## Tableau de bord — Indices de référence
+
+```{r tbl-indices}
+# ──────────────────────────────────────────────────────────────────────
+# Tableau synthétique des principaux indices : dernier cours, variation
+# 1 jour, performance et volatilité sur 1 an glissant.
+# ──────────────────────────────────────────────────────────────────────
+meta_idx <- function(obj, label, tk) {
+  if (is.null(obj)) return(NULL)
+  cl  <- tryCatch(Ad(obj), error = function(e) Cl(obj))
+  cl  <- na.omit(cl)
+  n   <- nrow(cl)
+  if (n < 2) return(NULL)
+  lp  <- as.numeric(cl[n, 1])
+  r1j <- (lp - as.numeric(cl[n-1, 1])) / as.numeric(cl[n-1, 1]) * 100
+  # Fenêtre 1 an glissant
+  s1y <- as.Date(index(cl)[n]) - 365
+  rw  <- dailyReturn(cl, type = "log")
+  rw  <- rw[index(rw) >= s1y]
+  r1a <- as.numeric(Return.annualized(rw, scale = 252)) * 100
+  v1a <- as.numeric(StdDev.annualized(rw, scale = 252)) * 100
+  data.frame(Marché = label, Ticker = tk,
+    Dernier    = formatC(lp, format = "f", digits = 2, big.mark = " "),
+    `Var. 1j`  = sprintf("%+.2f%%", r1j),
+    `Perf. 1an`= sprintf("%+.1f%%", r1a),
+    `Vol. 1an` = sprintf("%.1f%%",  v1a),
+    check.names = FALSE)
+}
+
+rows_idx <- rbind(
+  meta_idx(cac,   "CAC 40",   IDX_CAC),
+  meta_idx(dax,   "DAX 40",   IDX_DAX),
+  meta_idx(sp500, "S&P 500",  IDX_SP500))
+
+# Ajout du VIX manuellement (pas de rendement annualisé pertinent)
+if (!is.null(vix)) {
+  cv  <- na.omit(Cl(vix))
+  nv  <- nrow(cv)
+  r1v <- (as.numeric(cv[nv,1]) - as.numeric(cv[nv-1,1])) /
+           as.numeric(cv[nv-1,1]) * 100
+  rows_idx <- rbind(rows_idx, data.frame(
+    Marché = "VIX (peur)", Ticker = IDX_VIX,
+    Dernier = sprintf("%.2f", as.numeric(cv[nv,1])),
+    `Var. 1j` = sprintf("%+.2f%%", r1v),
+    `Perf. 1an` = "—", `Vol. 1an` = "—", check.names = FALSE))
+}
+
+DT::datatable(rows_idx, rownames = FALSE,
+  options = list(dom = "t", ordering = FALSE),
+  class = "compact stripe hover") |>
+  DT::formatStyle("Var. 1j",
+    color = DT::styleInterval(0, c("#d62728","#2ca02c")), fontWeight = "bold") |>
+  DT::formatStyle("Perf. 1an",
+    color = DT::styleInterval(0, c("#d62728","#2ca02c")))
+```
+
+## Performances cumulées des indices (depuis 2008)
+
+```{r fig-indices-plotly}
+# Graphique interactif (Plotly) : permet de zoomer, filtrer par légende
+rl_idx <- Filter(Negate(is.null), list(
+  `CAC 40`  = tryCatch({r <- dailyReturn(Ad(cac),   "log"); colnames(r) <- "CAC 40";  r}, error=function(e)NULL),
+  `DAX 40`  = tryCatch({r <- dailyReturn(Ad(dax),   "log"); colnames(r) <- "DAX 40";  r}, error=function(e)NULL),
+  `S&P 500` = tryCatch({r <- dailyReturn(Ad(sp500), "log"); colnames(r) <- "S&P 500"; r}, error=function(e)NULL)
+))
+
+if (length(rl_idx) >= 2) {
+  ai  <- na.omit(Reduce(function(a, b) merge(a, b, join = "inner"), rl_idx))
+  iw  <- window(ai, start = as.Date(DATE_DEBUT))
+  di  <- as.Date(index(iw))
+  cl_idx <- c("CAC 40"="#2c7bb6","DAX 40"="#d7191c","S&P 500"="#1a9641")
+
+  fig <- plot_ly(type = "scatter", mode = "lines")
+  for (nm in colnames(iw))
+    fig <- add_trace(fig, x = di, y = as.numeric(rebase100(iw[, nm])),
+                     name = nm, line = list(color = cl_idx[[nm]], width = 1.8))
+  fig |>
+    add_segments(x=min(di),xend=max(di),y=100,yend=100,
+                 line=list(color="grey",dash="dot",width=.8),showlegend=FALSE,inherit=FALSE) |>
+    layout(
+      title = list(text = "Performances cumulées — indices de référence (base 100, depuis 2008)",
+                   font = list(size = 13)),
+      xaxis = list(title="", gridcolor="#f0f0f0",
+                   rangeselector = list(buttons = list(
+                     list(count=1, label="1A",  step="year", stepmode="backward"),
+                     list(count=5, label="5A",  step="year", stepmode="backward"),
+                     list(count=10,label="10A", step="year", stepmode="backward"),
+                     list(step="all",label="Max")
+                   ))),
+      yaxis    = list(title="Base 100",gridcolor="#f0f0f0"),
+      legend   = list(orientation="h",x=0,y=-0.2),
+      hovermode= "x unified",
+      plot_bgcolor="white", paper_bgcolor="white"
+    )
+}
+```
+
+---
+
+# Catalogue des 15 instruments
+
+```{r fiches-render}
+#| output: asis
+
+# ──────────────────────────────────────────────────────────────────────
+# Génération des fiches HTML pour chaque instrument.
+# Les statistiques sont calculées sur la période commune (all_ptfl).
+# ──────────────────────────────────────────────────────────────────────
+library(htmltools)
+
+for (cat_name in c("ETF Monde","ETF Technologie","ETF Amérique","ETF Émergents",
+                   "Or","Industrie","Luxe","Cosmétiques","Pharmacie",
+                   "Énergie","Finance","Technologie","Boissons","Distribution")) {
+  items <- Filter(function(x) x$cat == cat_name, CATALOGUE)
+  if (!length(items)) next
+  cat("\n\n##", cat_name, "\n\n")
+
+  for (inst in items) {
+    tk    <- inst$ticker
+    score <- score_tk(tk)
+    r_tk  <- tryCatch(na.omit(all_ptfl[,tk]), error=function(e)NULL)
+
+    if (!is.null(r_tk) && length(r_tk) > 20) {
+      ra <- as.numeric(Return.annualized(r_tk, scale=252)) * 100
+      va <- as.numeric(StdDev.annualized(r_tk, scale=252)) * 100
+      sr <- (ra/100 - RF_AN) / (va/100)
+      md <- as.numeric(maxDrawdown(r_tk)) * 100
+      chips <- paste0(
+        sprintf('<span class="chip %s">Rdt: %+.1f%%</span>',
+                if(ra>=0)"chip-pos" else "chip-neg", ra),
+        sprintf('<span class="chip chip-neu">Vol: %.1f%%</span>', va),
+        sprintf('<span class="chip chip-neu">Sharpe: %.2f</span>', sr),
+        sprintf('<span class="chip chip-neg">Max DD: %.1f%%</span>', md))
+    } else {
+      chips <- '<span class="chip">Données insuffisantes</span>'
+    }
+
+    sc_cls  <- if(!is.na(score)&&score>=7)"sc-high" else if(!is.na(score)&&score>=5)"sc-mid" else "sc-low"
+    pea_txt <- if(inst$pea) "&#x2705; PEA" else "&#x1F535; CTO/AV"
+    ter_txt <- if(!is.na(inst$ter)) sprintf("TER : %.2f %%", inst$ter) else "Action directe"
+    stars   <- paste0(rep("&#9733;",inst$conv), rep("&#9734;",5-inst$conv), collapse="")
+    pros_li <- paste0("<li>",inst$pros,"</li>",collapse="")
+    cons_li <- paste0("<li>",inst$cons,"</li>",collapse="")
+    sc_txt  <- if(!is.na(score)) sprintf("%.1f",score) else "?"
+    bc_key  <- if(inst$cat %in% names(BADGE_CLASS)) BADGE_CLASS[[inst$cat]] else "b-action"
+
+    html_card <- paste0(
+      '<div class="instrument-card">',
+      '<div class="card-header">',
+      '<div><span class="card-title">',inst$nom,'</span>',
+      '&ensp;<code style="font-size:.78rem;color:#6c757d;">',tk,'</code></div>',
+      '<div style="display:flex;align-items:center;gap:.5rem;">',
+      '<span class="badge-cat ',bc_key,'">',inst$cat,'</span>',
+      '<span style="font-size:.78rem;color:#6c757d;">',pea_txt,' &nbsp;|&nbsp; ',ter_txt,'</span>',
+      '<span class="score-badge ',sc_cls,'" title="Score /10">',sc_txt,'</span>',
+      '</div></div>',
+      '<div class="card-stats">',chips,'</div>',
+      '<div style="font-size:.8rem;color:#6c757d;margin:.2rem 0;">',
+      'Conviction&nbsp;: <strong>',stars,'</strong>',
+      ' &nbsp;|&nbsp; Risque&nbsp;: <strong>',inst$rsk,' / 5</strong></div>',
+      '<div class="card-desc">',inst$desc,'</div>',
+      '<div class="pros-cons">',
+      '<div class="pros"><strong>&#x2705; Points positifs</strong>',
+      '<ul style="margin:0;padding-left:1.1rem;">',pros_li,'</ul></div>',
+      '<div class="cons"><strong>&#x26A0; Points de vigilance</strong>',
+      '<ul style="margin:0;padding-left:1.1rem;">',cons_li,'</ul></div>',
+      '</div></div>'
+    )
+    cat(as.character(HTML(html_card)), "\n\n")
+  }
+}
+```
+
+---
+
+# Analyse individuelle par instrument
+
+::: {.callout-note}
+Pour chaque instrument : **4 horizons temporels** (15, 10, 5, 1 an), **analyse technique** (Bandes de Bollinger + RSI 14 jours) et **heatmap des rendements mensuels**. Les horizons pour lesquels l'historique est insuffisant (< 20 observations) sont automatiquement omis.
+:::
+
+```{r individual-analysis}
+#| results: asis
+#| fig-width: 12
+#| fig-height: 8
+
+# ──────────────────────────────────────────────────────────────────────
+# BOUCLE D'ANALYSE INDIVIDUELLE — génère une section Markdown pour
+# chaque instrument du catalogue. Utilise print() pour les ggplot2
+# (obligatoire dans une boucle knitr avec results='asis').
+# ──────────────────────────────────────────────────────────────────────
+for (info in CATALOGUE) {
+  tk <- info$ticker
+
+  # En-tête de section (Markdown dynamique capté par le TOC Quarto)
+  cat(sprintf('\n\n## %s — `%s` {#%s}\n\n',
+              info$nom, tk,
+              gsub("[^a-zA-Z0-9]", "-", tolower(tk))))
+
+  # Callout de description
+  cat(paste0('::: {.callout-note appearance="minimal"}\n',
+             '**Catégorie :** ', info$cat,
+             ' | ', if(info$pea) '✅ PEA' else '🔵 CTO/AV',
+             if(!is.na(info$ter)) sprintf(' | TER : %.2f %%', info$ter) else ' | Action directe',
+             '\n\n', info$desc, '\n:::\n\n'))
+
+  # Récupération des prix ajustés
+  obj <- ptfl_list[[tk]]
+  if (is.null(obj)) {
+    cat('::: {.callout-warning}\nDonnées non disponibles pour cet instrument.\n:::\n\n---\n\n')
+    next
+  }
+  prices <- tryCatch(Ad(obj) |> na.omit(), error=function(e) NULL)
+  if (is.null(prices) || nrow(prices) < 30) {
+    cat('::: {.callout-warning}\nHistorique de prix insuffisant.\n:::\n\n---\n\n')
+    next
+  }
+
+  # Informations sur la disponibilité des données
+  d_start <- as.Date(index(prices)[1])
+  d_end   <- as.Date(index(prices)[nrow(prices)])
+  n_years <- as.numeric(d_end - d_start) / 365.25
+
+  cat(sprintf('**Données Yahoo Finance :** %s → %s (**%.1f ans** d\'historique)\n\n',
+              format(d_start, "%d/%m/%Y"), format(d_end, "%d/%m/%Y"), n_years))
+
+  # ── Graphiques multi-horizons ──────────────────────────────────────
+  cat('### Évolution du cours sur différents horizons\n\n')
+  h_plots <- make_horizon_plots(prices, info$nom)
+  if (length(h_plots) == 0) {
+    cat('*Données insuffisantes pour générer les graphiques d\'horizon.*\n\n')
+  } else {
+    combined_h <- wrap_plots(h_plots, ncol = min(2, length(h_plots))) +
+      plot_annotation(
+        title    = sprintf('Cours de %s — base 100 à la date de départ de chaque horizon', info$nom),
+        subtitle = 'Ruban vert = performance positive · Ruban rouge = performance négative',
+        theme    = theme(
+          plot.title    = element_text(face="bold",size=13,color="#1a1a2e",hjust=0.5),
+          plot.subtitle = element_text(size=9,color="#6c757d",hjust=0.5)
+        )
+      )
+    print(combined_h)
+    cat('\n\n')
+  }
+
+  # ── Analyse technique (Bollinger + RSI) ───────────────────────────
+  cat('### Analyse technique — 14 derniers mois\n\n')
+  bb_p  <- make_bollinger_chart(prices, info$nom)
+  rsi_p <- make_rsi_chart(prices, info$nom)
+
+  if (!is.null(bb_p) && !is.null(rsi_p)) {
+    tech_combined <- (bb_p / rsi_p) +
+      plot_layout(heights = c(2.2, 1)) +
+      plot_annotation(
+        caption = paste0(
+          "Bandes de Bollinger : bande supérieure = SMA20 + 2σ, bande inférieure = SMA20 − 2σ. ",
+          "Cours proche de la bande sup. → potentiel surachat. ",
+          "RSI > 70 → surachat | RSI < 30 → survente."
+        ),
+        theme = theme(plot.caption = element_text(size=8,color="#6c757d",hjust=0))
+      )
+    print(tech_combined)
+    cat('\n\n')
+  } else {
+    cat('*Données insuffisantes pour l\'analyse technique.*\n\n')
+  }
+
+  # ── Heatmap des rendements mensuels ───────────────────────────────
+  cat('### Rendements mensuels historiques\n\n')
+  hm_p <- make_monthly_heatmap(prices, info$nom)
+  if (!is.null(hm_p)) {
+    print(hm_p + theme_finance(base_size=10))
+    cat('\n\n')
+  } else {
+    cat('*Historique insuffisant pour la heatmap mensuelle.*\n\n')
+  }
+
+  # ── Statistiques clés (sur toute la période disponible) ───────────
+  cat('### Statistiques clés\n\n')
+  r_tk <- tryCatch(na.omit(all_ptfl[, tk]), error=function(e) NULL)
+  if (!is.null(r_tk) && length(r_tk) > 60) {
+    ra  <- as.numeric(Return.annualized(r_tk,  scale=252)) * 100
+    va  <- as.numeric(StdDev.annualized(r_tk,  scale=252)) * 100
+    sr  <- as.numeric(SharpeRatio(r_tk,  Rf=RF_DAILY, FUN="StdDev")[1])
+    so  <- as.numeric(SortinoRatio(r_tk, MAR=RF_DAILY)[1])
+    md  <- as.numeric(maxDrawdown(r_tk)) * 100
+    v95 <- abs(as.numeric(VaR(r_tk, p=.95, method="historical"))) * 100
+    c95 <- abs(as.numeric(ES(r_tk,  p=.95, method="historical"))) * 100
+    sk  <- skewness(as.numeric(r_tk))
+    ku  <- kurtosis(as.numeric(r_tk))
+
+    stats_tbl <- data.frame(
+      Indicateur = c("Rendement annualisé","Volatilité annualisée",
+                     "Ratio de Sharpe","Ratio de Sortino",
+                     "Max Drawdown","VaR 95 % (1 jour)","CVaR 95 % (1 jour)",
+                     "Asymétrie (skewness)","Excès de kurtosis"),
+      Valeur = c(sprintf("%+.2f %%",ra), sprintf("%.2f %%",va),
+                 sprintf("%.3f",sr), sprintf("%.3f",so),
+                 sprintf("-%.1f %%",md), sprintf("-%.2f %%",v95),
+                 sprintf("-%.2f %%",c95), sprintf("%.3f",sk),
+                 sprintf("%.3f",ku-3)),
+      Interprétation = c(
+        if(ra>10)"Excellent (>10%)" else if(ra>5)"Bon (5–10%)" else if(ra>0)"Faible (0–5%)" else "Négatif",
+        if(va<12)"Faible (<12%)" else if(va<20)"Modéré (12–20%)" else "Élevé (>20%)",
+        if(sr>1)"Excellent (>1)" else if(sr>0.5)"Bon (0,5–1)" else if(sr>0)"Acceptable" else "Négatif",
+        if(so>1.2)"Excellent" else if(so>0.7)"Bon" else "Acceptable",
+        if(md<15)"Faible (<15%)" else if(md<30)"Modéré (15–30%)" else "Élevé (>30%)",
+        "Perte max. 5% du temps",
+        "Perte moy. dans les 5% pires jours",
+        if(abs(sk)<0.5)"Distribution symétrique" else if(sk<0)"Queue gauche (pertes extrêmes)" else "Queue droite",
+        if(abs(ku-3)<1)"Distribution normale" else if(ku>3)"Queues épaisses (risque extrême)" else "Queues minces"
+      ),
+      check.names = FALSE
+    )
+    cat(knitr::kable(stats_tbl, format="html",
+                     caption=sprintf("Statistiques — %s (période complète disponible)", info$nom),
+                     escape=FALSE) |> as.character())
+  }
+
+  cat('\n\n---\n\n')
+}
+```
+
+---
+
+# Analyse comparative globale
+
+## Tableau récapitulatif de tous les instruments
+
+```{r tbl-stats-global}
+# ──────────────────────────────────────────────────────────────────────
+# Table comparative : toutes les métriques, triée par score décroissant.
+# Permet de comparer les instruments sur des critères homogènes.
+# ──────────────────────────────────────────────────────────────────────
+rows_s <- do.call(rbind, lapply(colnames(ptfl_w), function(nm) {
+  r  <- na.omit(ptfl_w[, nm])
+  if (length(r) < 20) return(NULL)
+  ra <- as.numeric(Return.annualized(r, scale=252))
+  va <- as.numeric(StdDev.annualized(r, scale=252))
+  sr <- as.numeric(SharpeRatio(r, Rf=RF_DAILY, FUN="StdDev")[1])
+  so <- as.numeric(SortinoRatio(r, MAR=RF_DAILY)[1])
+  md <- as.numeric(maxDrawdown(r))
+  v5 <- abs(as.numeric(VaR(r, p=.95, method="historical")))
+  c5 <- abs(as.numeric(ES(r,  p=.95, method="historical")))
+  ii <- Filter(function(x) x$ticker == nm, CATALOGUE)
+  data.frame(
+    Instrument = NOMS[nm],
+    PEA        = if(length(ii)>0 && ii[[1]]$pea) "✅" else "🔵",
+    `Rdt ann.` = sprintf("%+.1f%%", ra*100),
+    `Vol. ann.`= sprintf("%.1f%%",  va*100),
+    Sharpe     = round(sr, 2),
+    Sortino    = round(so, 2),
+    `Max DD`   = sprintf("%.1f%%",  md*100),
+    `VaR 95%`  = sprintf("%.2f%%",  v5*100),
+    `CVaR 95%` = sprintf("%.2f%%",  c5*100),
+    Score      = score_tk(nm),
+    check.names = FALSE
+  )
+}))
+
+DT::datatable(rows_s, rownames=FALSE, filter="top",
+  options=list(pageLength=15, dom="tip", order=list(list(9,"desc"))),
+  class="compact stripe hover") |>
+  DT::formatStyle("Rdt ann.",
+    color=DT::styleInterval(0, c("#d62728","#2ca02c")), fontWeight="bold") |>
+  DT::formatStyle("Sharpe",
+    color=DT::styleInterval(c(0,.5), c("#d62728","#fd7e14","#2ca02c"))) |>
+  DT::formatStyle("Score",
+    background=DT::styleInterval(c(5,7),c("#fce4ec","#fff3cd","#d3f9d8")),
+    fontWeight="bold")
+```
+
+## Espace rendement / risque
+
+```{r fig-rr-ggplot}
+#| fig-height: 7
+# ──────────────────────────────────────────────────────────────────────
+# Nuage de points rendement/risque — graphique statique ggplot2.
+# Chaque point = un instrument. La droite en pointillés = capital market line
+# théorique partant du taux sans risque. Les instruments au-dessus
+# ont un meilleur Sharpe.
+# ──────────────────────────────────────────────────────────────────────
+rr_df <- do.call(rbind, lapply(seq_along(colnames(ptfl_w)), function(i) {
+  nm <- colnames(ptfl_w)[i]
+  r  <- na.omit(ptfl_w[, nm])
+  ii <- Filter(function(x) x$ticker==nm, CATALOGUE)
+  data.frame(
+    Instrument = NOMS[nm],
+    Catégorie  = if(length(ii)>0) ii[[1]]$cat else "Autre",
+    Vol  = as.numeric(StdDev.annualized(r, scale=252)) * 100,
+    Rdt  = as.numeric(Return.annualized(r, scale=252)) * 100,
+    Col  = PAL[i],
+    stringsAsFactors = FALSE
+  )
+}))
+
+# Ligne du marché des capitaux (Capital Market Line) :
+# droite partant de (0, Rf) passant par le portefeuille à Sharpe max
+max_sharpe_pt <- rr_df[which.max((rr_df$Rdt - RF_AN*100) / rr_df$Vol), ]
+slope_cml <- (max_sharpe_pt$Rdt - RF_AN*100) / max_sharpe_pt$Vol
+
+ggplot(rr_df, aes(x=Vol, y=Rdt, color=Catégorie)) +
+  # Ligne du marché des capitaux
+  geom_abline(intercept=RF_AN*100, slope=slope_cml,
+              linetype="dashed", color="grey60", linewidth=0.7) +
+  # Taux sans risque
+  geom_hline(yintercept=RF_AN*100, linetype="dotted", color="grey70", linewidth=0.5) +
+  annotate("text", x=max(rr_df$Vol)*0.98, y=RF_AN*100+0.8,
+           label=sprintf("Rf = %.1f%%", RF_AN*100), hjust=1, size=3, color="grey50") +
+  # Points instruments
+  geom_point(size=4, alpha=0.85) +
+  # Labels non superposés
+  ggrepel::geom_text_repel(aes(label=Instrument), size=3.2, max.overlaps=20,
+                           segment.color="grey70", segment.size=0.4,
+                           box.padding=0.35, point.padding=0.3) +
+  scale_color_manual(values=c(
+    "ETF Monde"="#2c7bb6","ETF Technologie"="#d7191c","ETF Amérique"="#fdae61",
+    "ETF Émergents"="#abd9e9","Or"="#d4af37","Industrie"="#1a9641",
+    "Luxe"="#762a83","Cosmétiques"="#e377c2","Pharmacie"="#2ca02c",
+    "Énergie"="#8c564b","Finance"="#ff7f0e","Technologie"="#9467bd",
+    "Boissons"="#17becf","Distribution"="#bcbd22"
+  )) +
+  labs(
+    title    = "Espace rendement / risque — tous instruments",
+    subtitle = sprintf("Période : %s → %s | Rf = %.1f %% | Taille des points proportionnelle au Sharpe",
+                       format(as.Date(DATE_DEBUT),"%Y"), format(DATE_FIN,"%Y"), RF_AN*100),
+    x = "Volatilité annualisée (%)",
+    y = "Rendement annualisé (%)",
+    color = "Catégorie",
+    caption = "La droite en pointillés est la Capital Market Line (Rf → portefeuille Sharpe max)"
+  ) +
+  theme_finance() +
+  theme(legend.position = "right",
+        legend.text = element_text(size=9),
+        legend.title = element_text(size=10))
+```
+
+## Matrice de corrélation (statique)
+
+```{r fig-corr-ggplot}
+#| fig-height: 7
+# ──────────────────────────────────────────────────────────────────────
+# La corrélation mesure le co-mouvement entre -1 (parfaitement inversés)
+# et +1 (parfaitement liés). Des corrélations faibles entre actifs
+# permettent de réduire le risque de portefeuille (diversification).
+# ──────────────────────────────────────────────────────────────────────
+tks_ord <- PTFL_TICKERS[PTFL_TICKERS %in% colnames(ptfl_w)]
+cm      <- cor(coredata(ptfl_w[, tks_ord]), use="complete.obs")
+labs_c  <- NOMS[tks_ord]
+rownames(cm) <- colnames(cm) <- labs_c
+
+# Transformation en format long pour ggplot2
+cm_long <- as.data.frame(as.table(cm))
+names(cm_long) <- c("Var1","Var2","Corr")
+cm_long$Var1 <- factor(cm_long$Var1, levels=labs_c)
+cm_long$Var2 <- factor(cm_long$Var2, levels=rev(labs_c))
+
+ggplot(cm_long, aes(x=Var1, y=Var2, fill=Corr)) +
+  geom_tile(color="white", linewidth=0.4) +
+  geom_text(aes(label=sprintf("%.2f", Corr),
+                color=abs(Corr)>0.6), size=2.6) +
+  scale_fill_gradient2(low="#d7191c", mid="#f7f7f7", high="#2c7bb6",
+                       midpoint=0, limits=c(-1,1), name="Corrélation") +
+  scale_color_manual(values=c("black","white"), guide="none") +
+  labs(
+    title    = "Matrice de corrélation — rendements journaliers",
+    subtitle = sprintf("Période %s–%s | Bleu = corrélation positive | Rouge = corrélation négative",
+                       format(as.Date(DATE_DEBUT),"%Y"), format(DATE_FIN,"%Y")),
+    x=NULL, y=NULL,
+    caption  = "Corrélation faible entre deux actifs = meilleure diversification du portefeuille"
+  ) +
+  theme_finance() +
+  theme(axis.text.x = element_text(angle=40, hjust=1, size=8),
+        axis.text.y = element_text(size=8),
+        panel.grid  = element_blank(),
+        legend.position = "right")
+```
+
+## Max Drawdown comparé
+
+```{r fig-mdd-ggplot}
+#| fig-height: 6
+# ──────────────────────────────────────────────────────────────────────
+# Le Max Drawdown représente la plus grande perte subie depuis un sommet.
+# Un MDD de -50 % nécessite un gain de +100 % pour récupérer.
+# ──────────────────────────────────────────────────────────────────────
+dd_df <- do.call(rbind, lapply(seq_along(colnames(ptfl_w)), function(i) {
+  nm  <- colnames(ptfl_w)[i]
+  r   <- na.omit(ptfl_w[, nm])
+  data.frame(
+    Inst = NOMS[nm],
+    DD   = as.numeric(maxDrawdown(r)) * 100,
+    Col  = PAL[i]
+  )
+})) |> dplyr::arrange(desc(DD))
+
+dd_df$couleur <- ifelse(dd_df$DD > 50, "#d7191c",
+                  ifelse(dd_df$DD > 30, "#fd7e14", "#1a9641"))
+
+ggplot(dd_df, aes(x=reorder(Inst, -DD), y=-DD, fill=couleur)) +
+  geom_col(width=0.72, show.legend=FALSE) +
+  geom_text(aes(label=sprintf("−%.0f%%", DD)),
+            hjust=-0.1, size=3.2, color="grey20") +
+  scale_fill_identity() +
+  scale_y_continuous(labels=function(x) paste0(x, "%"),
+                     expand=expansion(mult=c(0,.15))) +
+  coord_flip() +
+  labs(
+    title    = "Max Drawdown historique — tous instruments",
+    subtitle = sprintf("Période %s–%s | Vert < 30 %% · Orange 30–50 %% · Rouge > 50 %%",
+                       format(as.Date(DATE_DEBUT),"%Y"), format(DATE_FIN,"%Y")),
+    x = NULL, y = "Max Drawdown (%)",
+    caption  = "Max Drawdown = pire perte consécutive depuis un sommet historique"
+  ) +
+  theme_finance()
+```
+
+## Ratio de Sharpe comparé
+
+```{r fig-sharpe-ggplot}
+#| fig-height: 6
+sv_df <- do.call(rbind, lapply(colnames(ptfl_w), function(nm) {
+  r   <- na.omit(ptfl_w[, nm])
+  sr  <- (as.numeric(Return.annualized(r,scale=252)) - RF_AN) /
+           as.numeric(StdDev.annualized(r,scale=252))
+  data.frame(Inst=NOMS[nm], Sharpe=round(sr,3), stringsAsFactors=FALSE)
+})) |> dplyr::arrange(Sharpe)
+
+sv_df$couleur <- ifelse(sv_df$Sharpe >= 0.5, "#1a9641",
+                  ifelse(sv_df$Sharpe >= 0,   "#fd7e14", "#d7191c"))
+
+ggplot(sv_df, aes(x=reorder(Inst, Sharpe), y=Sharpe, fill=couleur)) +
+  geom_col(width=0.72, show.legend=FALSE) +
+  geom_hline(yintercept=0,   color="grey30", linewidth=0.6) +
+  geom_hline(yintercept=0.5, color="#1a9641", linetype="dashed", linewidth=0.7) +
+  geom_text(aes(label=sprintf("%.2f", Sharpe),
+                hjust=ifelse(Sharpe>=0, -0.1, 1.1)),
+            size=3.2, color="grey20") +
+  scale_fill_identity() +
+  scale_y_continuous(expand=expansion(mult=c(.15,.15))) +
+  coord_flip() +
+  annotate("text", x=1, y=0.52, label="Seuil 0,5", hjust=0,
+           size=2.8, color="#1a9641") +
+  labs(
+    title    = sprintf("Ratio de Sharpe annualisé (Rf = %.1f %%)", RF_AN*100),
+    subtitle = "Vert ≥ 0,5 | Orange 0–0,5 | Rouge < 0",
+    x = NULL, y = "Ratio de Sharpe",
+    caption  = "Sharpe = (Rendement − Taux sans risque) / Volatilité"
+  ) +
+  theme_finance()
+```
+
+## Rendements annuels historiques
+
+```{r fig-annual-heatmap}
+#| fig-height: 7
+# ──────────────────────────────────────────────────────────────────────
+# Vue d'ensemble des rendements année par année pour chaque instrument.
+# Permet d'identifier les années exceptionnelles et les crises.
+# ──────────────────────────────────────────────────────────────────────
+ann_df <- do.call(rbind, lapply(colnames(ptfl_w), function(nm) {
+  r <- na.omit(ptfl_w[, nm])
+  # Agrégation annuelle : produit des rendements journaliers
+  r_ann <- apply.yearly(r, function(x) (prod(1 + x) - 1) * 100)
+  data.frame(
+    Ticker = NOMS[nm],
+    Annee  = as.integer(format(index(r_ann), "%Y")),
+    Rdt    = as.numeric(r_ann),
+    stringsAsFactors = FALSE
+  )
+}))
+
+lim_ann <- max(25, quantile(abs(ann_df$Rdt), 0.90, na.rm=TRUE))
+ann_df$txt_col <- ifelse(abs(ann_df$Rdt) > lim_ann * 0.55, "white", "grey20")
+
+ggplot(ann_df, aes(x=factor(Annee), y=Ticker, fill=Rdt)) +
+  geom_tile(color="white", linewidth=0.4) +
+  geom_text(aes(label=sprintf("%+.0f%%", Rdt), color=txt_col), size=2.5) +
+  scale_fill_gradient2(low="#d7191c", mid="white", high="#1a9641",
+                       midpoint=0, name="Rdt ann. (%)",
+                       limits=c(-lim_ann, lim_ann), oob=scales::squish) +
+  scale_color_identity() +
+  labs(
+    title    = "Rendements annuels historiques — tous instruments",
+    subtitle = "Chaque cellule = rendement de l'année civile (%)",
+    x = NULL, y = NULL,
+    caption  = "Les données des ETF débutent à leur date de création"
+  ) +
+  theme_finance() +
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=8),
+        axis.text.y = element_text(size=8),
+        panel.grid  = element_blank(),
+        legend.position = "right")
+```
+
+## Corrélations glissantes 60 jours
+
+```{r fig-rolling-corr}
+# ──────────────────────────────────────────────────────────────────────
+# Les corrélations ne sont pas stables dans le temps. En période de crise,
+# les corrélations entre actifs risqués MONTENT (diversification réduite).
+# C'est le problème fondamental du modèle de Markowitz.
+# ──────────────────────────────────────────────────────────────────────
+pairs_corr <- list(
+  list(a="CW8.PA",  b="PANX.PA", l="CW8 / Nasdaq"),
+  list(a="CW8.PA",  b="SGLD.PA", l="CW8 / Or"),
+  list(a="CW8.PA",  b="SAN.PA",  l="CW8 / Sanofi"),
+  list(a="MC.PA",   b="KER.PA",  l="LVMH / Kering"),
+  list(a="TTE.PA",   b="BNP.PA",  l="TotalE / BNP")
+)
+# Filtrage des paires dont les deux membres sont disponibles
+pairs_corr <- Filter(
+  function(p) p$a %in% colnames(all_ptfl) && p$b %in% colnames(all_ptfl),
+  pairs_corr
+)
+
+cols_rc <- c("#2c7bb6","#d4af37","#1a9641","#d7191c","#762a83")
+fig_rc  <- plot_ly(type="scatter", mode="lines")
+
+for (k in seq_along(pairs_corr)) {
+  p  <- pairs_corr[[k]]
+  m  <- na.omit(merge(
+    window(all_ptfl[,p$a], start=as.Date(DATE_DEBUT)),
+    window(all_ptfl[,p$b], start=as.Date(DATE_DEBUT)), join="inner"))
+  rc <- rollapply(m, 60, FUN=function(x) cor(x[,1],x[,2],use="complete.obs"),
+                  by.column=FALSE, align="right")
+  fig_rc <- add_trace(fig_rc, x=as.Date(index(rc)), y=as.numeric(rc),
+                      name=p$l, line=list(color=cols_rc[k], width=1.6))
+}
+
+fig_rc |>
+  add_segments(x=as.Date(DATE_DEBUT),xend=DATE_FIN,y=0,yend=0,
+               line=list(color="black",dash="dot",width=.8),showlegend=FALSE,inherit=FALSE) |>
+  layout(
+    title  = list(text="Corrélations glissantes 60 jours — paires clés",font=list(size=13)),
+    xaxis  = list(title="",gridcolor="#f0f0f0"),
+    yaxis  = list(title="Corrélation",range=c(-1,1),gridcolor="#f0f0f0"),
+    legend = list(orientation="h",x=0,y=-0.18),
+    hovermode="x unified",plot_bgcolor="white",paper_bgcolor="white",
+    annotations = list(list(
+      x=as.Date(DATE_DEBUT), y=0.05, text="Corrélation nulle",
+      showarrow=FALSE, font=list(size=9,color="grey"), xanchor="left"
+    ))
+  )
+```
+
+---
+
+# Optimisation de portefeuille (Markowitz)
+
+## Frontière efficiente — Simulation Monte Carlo
+
+::: {.callout-note}
+## Méthode de simulation
+
+Nous simulons **8 000 portefeuilles aléatoires** en tirant des vecteurs de pondérations uniformes sur le simplexe ($w_i \geq 0$, $\sum w_i = 1$). Chaque portefeuille est représenté dans l'espace (volatilité, rendement), coloré par son ratio de Sharpe. Les deux portefeuilles optimaux identifiés :
+
+- **Triangle rouge :** Variance Minimale (MVP) — minimise le risque
+- **Carré bleu :** Sharpe Maximal (MSP) — maximise le rendement par unité de risque
+:::
+
+```{r fig-frontier}
+#| fig-height: 7
+pc   <- na.omit(coredata(ptfl_w))
+na_n <- ncol(pc)
+mu_v <- colMeans(pc) * 252     # Rendements espérés annualisés
+cov_m<- cov(pc) * 252          # Matrice de covariance annualisée
+
+set.seed(42)
+N_sim <- 8000
+sr_v  <- rv <- vv <- numeric(N_sim)
+sw    <- matrix(0, N_sim, na_n)
+
+for (i in seq_len(N_sim)) {
+  # Tirage uniforme sur le simplexe (poids positifs, somme = 1)
+  w      <- runif(na_n); w <- w / sum(w)
+  rp     <- sum(w * mu_v)
+  vp     <- sqrt(as.numeric(t(w) %*% cov_m %*% w))
+  rv[i]  <- rp; vv[i] <- vp
+  sr_v[i]<- (rp - RF_AN) / vp
+  sw[i,] <- w
+}
+
+imv <- which.min(vv)    # Portefeuille Variance Minimale
+ims <- which.max(sr_v)  # Portefeuille Sharpe Maximal
+
+# Points individuels pour comparaison
+ind_df <- data.frame(
+  Inst = NOMS[colnames(ptfl_w)],
+  Vol  = sqrt(diag(cov_m)) * 100,
+  Rdt  = mu_v * 100
+)
+
+plot_ly() |>
+  # Nuage des 8 000 portefeuilles colorés par Sharpe
+  add_trace(x=vv*100, y=rv*100, type="scatter", mode="markers",
+    marker=list(size=3, color=sr_v,
+      colorscale=list(c(0,"#d7191c"),c(.5,"#fdae61"),c(1,"#1a9641")),
+      opacity=.40, showscale=TRUE,
+      colorbar=list(title="Sharpe",len=.55,y=.42)),
+    name="Portefeuilles simulés",
+    hovertemplate="Vol: %{x:.1f}%<br>Rdt: %{y:+.1f}%<extra></extra>") |>
+  # Instruments individuels
+  add_trace(data=ind_df, x=~Vol, y=~Rdt, type="scatter",
+    mode="markers+text", text=~Inst, textposition="top right",
+    marker=list(size=8, color="rgba(40,40,40,.75)", symbol="x",
+                line=list(color="black",width=1.5)),
+    name="Instruments seuls",
+    hovertemplate="%{text}<br>Vol: %{x:.1f}%<br>Rdt: %{y:+.1f}%<extra></extra>") |>
+  # Portefeuille Variance Minimale
+  add_trace(x=vv[imv]*100, y=rv[imv]*100, type="scatter", mode="markers",
+    marker=list(size=15,color="#d7191c",symbol="triangle-up",
+                line=list(color="white",width=2)),
+    name=sprintf("Min Variance (Sharpe=%.2f)",sr_v[imv])) |>
+  # Portefeuille Sharpe Maximal
+  add_trace(x=vv[ims]*100, y=rv[ims]*100, type="scatter", mode="markers",
+    marker=list(size=15,color="#2c7bb6",symbol="square",
+                line=list(color="white",width=2)),
+    name=sprintf("Max Sharpe (Sharpe=%.2f)",sr_v[ims])) |>
+  layout(
+    title  = list(text="Frontière efficiente — Monte Carlo (8 000 portefeuilles)",font=list(size=13)),
+    xaxis  = list(title="Volatilité annualisée (%)",gridcolor="#f0f0f0"),
+    yaxis  = list(title="Rendement annualisé (%)",gridcolor="#f0f0f0"),
+    legend = list(orientation="h",x=0,y=-0.22,font=list(size=11)),
+    hovermode="closest",plot_bgcolor="white",paper_bgcolor="white"
+  )
+```
+
+## Pondérations des portefeuilles optimaux
+
+```{r tbl-optimal}
+#| fig-width: 11
+#| fig-height: 5
+nc_short <- NOMS[colnames(ptfl_w)]
+
+build_opt_row <- function(idx, label) {
+  w  <- sw[idx, ]
+  # Conserver seulement les pondérations significatives (> 1 %)
+  w_sig <- round(w * 100, 1)
+  df <- data.frame(
+    Portefeuille = label,
+    `Rdt ann.`   = sprintf("%+.1f%%", rv[idx]*100),
+    `Vol. ann.`  = sprintf("%.1f%%",  vv[idx]*100),
+    Sharpe       = round(sr_v[idx], 2),
+    check.names  = FALSE
+  )
+  for (j in seq_along(nc_short)) df[[nc_short[j]]] <- sprintf("%.1f%%", w_sig[j])
+  df
+}
+
+tbl_opt <- rbind(
+  build_opt_row(imv, "📐 Variance Minimale"),
+  build_opt_row(ims, "🎯 Sharpe Maximal")
+)
+
+DT::datatable(tbl_opt, rownames=FALSE,
+  options=list(dom="t", scrollX=TRUE, ordering=FALSE),
+  class="compact stripe") |>
+  DT::formatStyle("Sharpe",
+    background=DT::styleInterval(c(.3,.6),c("#fce4ec","#fff3cd","#d3f9d8")),
+    fontWeight="bold")
+```
+
+```{r fig-opt-weights}
+#| fig-height: 5
+# Visualisation en barres des pondérations — plus lisible que la table
+wt_df <- do.call(rbind, lapply(list(
+    list(idx=imv, label="📐 Variance Minimale"),
+    list(idx=ims, label="🎯 Sharpe Maximal")
+  ), function(x) {
+    data.frame(
+      Portefeuille = x$label,
+      Instrument   = nc_short,
+      Poids        = round(sw[x$idx, ] * 100, 1)
+    )
+  }
+))
+
+# Filtrer les pondérations négligeables
+wt_df <- wt_df[wt_df$Poids > 0.5, ]
+
+ggplot(wt_df, aes(x=reorder(Instrument, -Poids), y=Poids, fill=Portefeuille)) +
+  geom_col(position="dodge", width=0.72) +
+  geom_text(aes(label=sprintf("%.0f%%", Poids)),
+            position=position_dodge(width=0.72), vjust=-0.4, size=2.8) +
+  scale_fill_manual(values=c("📐 Variance Minimale"="#1a9641",
+                              "🎯 Sharpe Maximal"="#2c7bb6")) +
+  scale_y_continuous(labels=function(x) paste0(x, "%"),
+                     expand=expansion(mult=c(0,.12))) +
+  labs(
+    title    = "Pondérations des portefeuilles optimaux (Markowitz)",
+    subtitle = "Seules les pondérations > 0,5 % sont affichées",
+    x = NULL, y = "Pondération (%)", fill = NULL,
+    caption  = "Résultat de la simulation Monte Carlo (8 000 tirages) — sans contrainte de diversification minimale"
+  ) +
+  theme_finance() +
+  theme(axis.text.x = element_text(angle=35, hjust=1, size=9))
+```
+
+---
+
+# Recommandations & Sélection des meilleurs portefeuilles
+
+## Scoring final des instruments
+
+```{r tbl-scoring}
+sc_tbl <- do.call(rbind, lapply(CATALOGUE, function(inst) {
+  tk    <- inst$ticker
+  score <- score_tk(tk)
+  r_tk  <- tryCatch(na.omit(ptfl_w[,tk]), error=function(e)NULL)
+  if (!is.null(r_tk) && length(r_tk)>20) {
+    ra <- as.numeric(Return.annualized(r_tk,scale=252))*100
+    va <- as.numeric(StdDev.annualized(r_tk,scale=252))*100
+    sr <- (ra/100-RF_AN)/(va/100)
+    md <- as.numeric(maxDrawdown(r_tk))*100
+  } else ra <- va <- sr <- md <- NA
+
+  rec <- if(!is.na(score)) {
+    if(score>=7.5) "⭐ Fort achat" else if(score>=6) "✅ Achat" else
+    if(score>=4.5) "🟡 Neutre"    else "⚠ Prudence"
+  } else "—"
+
+  data.frame(
+    Instrument  = inst$nom, Catégorie = inst$cat,
+    PEA         = if(inst$pea)"✅" else "🔵",
+    `Rdt ann.`  = ifelse(is.na(ra),"—",sprintf("%+.1f%%",ra)),
+    `Vol. ann.` = ifelse(is.na(va),"—",sprintf("%.1f%%",va)),
+    Sharpe      = ifelse(is.na(sr),"—",sprintf("%.2f",sr)),
+    `Max DD`    = ifelse(is.na(md),"—",sprintf("%.1f%%",md)),
+    Score       = ifelse(is.na(score),"—",score),
+    Conviction  = paste0(rep("★",inst$conv),rep("☆",5-inst$conv),collapse=""),
+    Recommandation = rec,
+    check.names = FALSE
+  )
+}))
+
+DT::datatable(sc_tbl, rownames=FALSE, filter="top",
+  options=list(pageLength=15,dom="tip",order=list(list(7,"desc"))),
+  class="compact stripe hover") |>
+  DT::formatStyle("Score",
+    background=DT::styleInterval(c(5,7),c("#fce4ec","#fff3cd","#d3f9d8")),
+    fontWeight="bold") |>
+  DT::formatStyle("Recommandation", fontWeight="bold")
+```
+
+## Trois portefeuilles recommandés
+
+```{r portfolios-render}
+#| output: asis
+library(htmltools)
+
+# Définition des 3 portefeuilles : défensif, équilibré, croissance
+portfolios_def <- list(
+  list(
+    id    = "defensif",
+    titre = "&#x1F6E1; Portefeuille D&#233;fensif",
+    sous  = "Priorit&#233; &#224; la pr&#233;servation du capital &mdash; Horizon 5&#8211;8 ans",
+    stats = "Rdt estim&#233; : ~6&#8211;8 %/an &middot; Vol. : ~10&#8211;12 % &middot; Sharpe : ~0,45",
+    couleur = "#1a9641",
+    lignes = list(
+      list("CW8","30%","C&#339;ur ETF Monde — diversification maximale (PEA)"),
+      list("PUST","10%","Compl&#233;ment S&amp;P 500 — exposition US (PEA)"),
+      list("SAN","15%","Sanofi — dividende 3,5 % &amp; profil d&#233;fensif (PEA)"),
+      list("Air Liq.","15%","Air Liquide — aristocrate dividende (PEA)"),
+      list("TotalE","10%","TotalEnergies — dividende 5&#8211;6 % (PEA)"),
+      list("SGLD","12%","Or physique — valeur refuge (CTO)"),
+      list("BNP","8%","BNP Paribas — valorisation d&#233;cot&#233;e (PEA)")
+    )
+  ),
+  list(
+    id    = "equilibre",
+    titre = "&#x2696;&#xFE0F; Portefeuille &#201;quilibr&#233;",
+    sous  = "Compromis rendement/risque — Horizon 8&#8211;15 ans",
+    stats = "Rdt estim&#233; : ~9&#8211;11 %/an &middot; Vol. : ~13&#8211;15 % &middot; Sharpe : ~0,55",
+    couleur = "#2c7bb6",
+    lignes = list(
+      list("CW8","30%","C&#339;ur ETF Monde (PEA)"),
+      list("PANX","15%","Moteur tech Nasdaq-100 (PEA)"),
+      list("PUST","10%","S&amp;P 500 compl&#233;ment (PEA)"),
+      list("LVMH","12%","Champion du luxe mondial (PEA)"),
+      list("Air Liq.","10%","Aristocrate dividende (PEA)"),
+      list("L&#8217;Or&#233;al","8%","Cosm&#233;tiques r&#233;silient (PEA)"),
+      list("SGLD","10%","Or — diversification d&#233;corr&#233;l&#233;e (CTO)"),
+      list("Sanofi","5%","Pharma d&#233;fensif (PEA)")
+    )
+  ),
+  list(
+    id    = "croissance",
+    titre = "&#x1F680; Portefeuille Croissance",
+    sous  = "Maximiser le rendement long terme — Horizon 15+ ans",
+    stats = "Rdt estim&#233; : ~13&#8211;16 %/an &middot; Vol. : ~17&#8211;20 % &middot; Sharpe : ~0,65",
+    couleur = "#d7191c",
+    lignes = list(
+      list("PANX","30%","Moteur principal — Nasdaq-100 tech (PEA)"),
+      list("CW8","20%","Socle diversifi&#233; mondial (PEA)"),
+      list("PUST","10%","S&amp;P 500 (PEA)"),
+      list("PAEEM","8%","Diversification &#233;mergents (PEA)"),
+      list("LVMH","12%","Luxe — pricing power (PEA)"),
+      list("Dassault","8%","Tech fran&#231;aise — SaaS (PEA)"),
+      list("SGLD","7%","Or — diversification (CTO)"),
+      list("DSY","5%","Compl&#233;ment tech (PEA)")
+    )
+  )
+)
+
+html_ports <- '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1.2rem;margin-top:1rem;">'
+
+for (p in portfolios_def) {
+  rows_html <- paste0(sapply(p$lignes, function(l) paste0(
+    '<div class="port-row">',
+    '<span><strong>',l[[1]],'</strong></span>',
+    '<span style="flex:1;padding:0 .6rem;color:#6c757d;font-size:.8rem;">',l[[3]],'</span>',
+    '<span class="port-pct" style="color:',p$couleur,';">',l[[2]],'</span>',
+    '</div>'
+  )), collapse="")
+
+  html_ports <- paste0(html_ports,
+    '<div class="port-card" style="border-top:3px solid ',p$couleur,';">',
+    '<h4 style="color:',p$couleur,';margin-top:0;">',p$titre,'</h4>',
+    '<p style="font-size:.82rem;color:#6c757d;margin:0 0 .8rem;">',p$sous,'</p>',
+    rows_html,
+    '<div style="margin-top:.8rem;font-size:.8rem;background:#f8f9fa;',
+    'padding:.5rem .7rem;border-radius:4px;color:#495057;">',
+    '<strong>&#x1F4CA;</strong> ',p$stats,'</div>',
+    '</div>'
+  )
+}
+html_ports <- paste0(html_ports, '</div>')
+cat(as.character(HTML(html_ports)))
+```
+
+## Performance simulée des trois portefeuilles
+
+```{r fig-perf-ports}
+# ──────────────────────────────────────────────────────────────────────
+# Simulation rétrospective des 3 portefeuilles sur données historiques.
+# ATTENTION : les performances passées ne préjugent pas des performances
+# futures. Cette simulation applique les pondérations cibles définies
+# ci-dessus aux rendements historiques observés.
+# ──────────────────────────────────────────────────────────────────────
+build_port_ret <- function(tks, wts) {
+  # Filtrer les tickers effectivement disponibles dans all_ptfl
+  ok  <- tks[tks %in% colnames(ptfl_w)]
+  if (length(ok) < 2) return(NULL)
+  w   <- wts[match(ok, tks)]; w <- w / sum(w)
+  # Rendement pondéré journalier du portefeuille
+  rowSums(sweep(coredata(ptfl_w[, ok]), 2, w, "*"))
+}
+
+r_def <- build_port_ret(
+  c("CW8.PA","PUST.PA","SAN.PA","AI.PA","TTE.PA","SGLD.PA","BNP.PA"),
+  c(.30,.10,.15,.15,.10,.12,.08))
+r_equ <- build_port_ret(
+  c("CW8.PA","PANX.PA","PUST.PA","MC.PA","AI.PA","OR.PA","SGLD.PA","SAN.PA"),
+  c(.30,.15,.10,.12,.10,.08,.10,.05))
+r_cro <- build_port_ret(
+  c("PANX.PA","CW8.PA","PUST.PA","PAEEM.PA","MC.PA","DSY.PA","SGLD.PA"),
+  c(.30,.20,.10,.08,.12,.08,.07))
+r_ref <- as.numeric(ptfl_w[,"CW8.PA"])  # Référence : CW8
+
+dp  <- as.Date(index(ptfl_w))
+nm  <- min(lengths(list(r_def, r_equ, r_cro, r_ref, dp)))
+d_p <- dp[seq_len(nm)]
+
+# Fonction de performance cumulée base 100
+cum100 <- function(r) cumprod(1 + na.fill(r[seq_len(nm)], 0)) * 100
+
+plot_ly(type="scatter", mode="lines") |>
+  add_trace(x=d_p, y=cum100(r_cro), name="🚀 Croissance",
+    line=list(color="#d7191c", width=2.2)) |>
+  add_trace(x=d_p, y=cum100(r_equ), name="⚖️ Équilibré",
+    line=list(color="#2c7bb6", width=2.0)) |>
+  add_trace(x=d_p, y=cum100(r_def), name="🛡 Défensif",
+    line=list(color="#1a9641", width=2.0)) |>
+  add_trace(x=d_p, y=cum100(r_ref), name="CW8 (référence)",
+    line=list(color="grey60", width=1.4, dash="dash")) |>
+  add_segments(x=min(d_p),xend=max(d_p),y=100,yend=100,
+               line=list(color="grey80",dash="dot",width=.8),
+               showlegend=FALSE,inherit=FALSE) |>
+  layout(
+    title  = list(text="Performance cumulée simulée — portefeuilles recommandés (base 100)",
+                  font=list(size=13)),
+    xaxis  = list(title="", gridcolor="#f0f0f0",
+                  rangeselector=list(buttons=list(
+                    list(count=1,label="1A",step="year",stepmode="backward"),
+                    list(count=3,label="3A",step="year",stepmode="backward"),
+                    list(count=5,label="5A",step="year",stepmode="backward"),
+                    list(step="all",label="Max")
+                  ))),
+    yaxis  = list(title="Base 100", gridcolor="#f0f0f0"),
+    legend = list(orientation="h",x=0,y=-0.2),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white"
+  )
+```
+
+---
+
+# Conclusion {.unnumbered}
+
+```{r top5}
+#| output: asis
+library(htmltools)
+
+# Calcul du top 5 par score
+ptfl_w   <- window(all_ptfl, start=as.Date(DATE_DEBUT))
+sc_all   <- sort(sapply(colnames(ptfl_w), score_tk), decreasing=TRUE)
+top5     <- head(names(sc_all), 5)
+bottom3  <- tail(names(sc_all[!is.na(sc_all)]), 3)
+
+li_top <- paste0(sprintf(
+  "<li><strong>%s</strong> (<code>%s</code>) &mdash; Score&nbsp;: <strong>%.1f / 10</strong></li>",
+  NOMS[top5], top5, sc_all[top5]), collapse="\n")
+
+li_bot <- paste0(sprintf(
+  "<li>%s (<code>%s</code>) &mdash; Score&nbsp;: %.1f / 10</li>",
+  NOMS[bottom3], bottom3, sc_all[bottom3]), collapse="\n")
+
+html_conclu <- paste0(
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin-bottom:1.5rem;">',
+  '<div class="callout callout-tip" style="border-left:4px solid #1a9641;',
+  'background:#f0fff4;padding:1rem 1.2rem;border-radius:6px;">',
+  '<p style="font-weight:700;margin:0 0 .5rem;color:#1a9641;">&#x1F3C6; Top 5 instruments</p>',
+  '<ol style="margin:0;padding-left:1.3rem;">',li_top,'</ol></div>',
+  '<div class="callout" style="border-left:4px solid #fd7e14;',
+  'background:#fff8f0;padding:1rem 1.2rem;border-radius:6px;">',
+  '<p style="font-weight:700;margin:0 0 .5rem;color:#fd7e14;">&#x26A0; Instruments à pondérer avec prudence</p>',
+  '<ul style="margin:0;padding-left:1.3rem;">',li_bot,'</ul></div>',
+  '</div>'
+)
+cat(as.character(HTML(html_conclu)))
+```
+
+Sur la période analysée (**`r format(as.Date(DATE_DEBUT),"%Y")` – `r format(DATE_FIN,"%Y")`**), les enseignements structurels sont les suivants :
+
+**ETF — la base indispensable**
+Le **CW8** reste la pierre angulaire d'un portefeuille passif (TER 0,12 %, PEA, diversification mondiale). Le **PANX** est un excellent moteur de performance à limiter à 20–30 % du portefeuille total.
+
+**Or — le stabilisateur méconnu**
+Le **SGLD** confirme son rôle unique : corrélation proche de zéro avec les actions, protection en temps de crise. Une allocation de 7–12 % améliore systématiquement le ratio de Sharpe du portefeuille global.
+
+**Actions françaises — qualité et sélectivité**
+**Air Liquide** et **L'Oréal** présentent les meilleurs profils quantitatifs (Sharpe, régularité). **Sanofi** offre valorisation attractive et dividende défensif. **BNP Paribas** présente un potentiel de revalorisation important à P/B < 0,8. **Carrefour** reste un titre à éviter ou pondérer marginalement.
+
+**Construction recommandée selon le profil :**
+
+| Profil | ETF diversifiés | Actions qualité | Or | ETF thématique |
+|--------|----------------|----------------|-----|----------------|
+| Défensif (5–8 ans) | 40–50 % | 30–35 % | 10–15 % | 0–5 % |
+| Équilibré (8–15 ans) | 45–55 % | 25–30 % | 8–12 % | 8–12 % |
+| Croissance (15+ ans) | 50–60 % | 20–25 % | 5–8 % | 15–25 % |
+
+<div class="disclaimer">
+⚠ <strong>Avertissement réglementaire :</strong> Ce document est produit à des fins éducatives et analytiques uniquement.
+Il ne constitue pas un conseil en investissement au sens des articles L. 321-1 et suivants du Code monétaire et financier.
+Les performances passées ne préjugent pas des performances futures. Toute décision d'investissement doit tenir compte
+de la situation personnelle de l'investisseur, de son horizon de placement, de sa tolérance au risque et de sa
+situation fiscale (PEA, CTO, assurance-vie). Consultez un conseiller financier agréé (CIF) pour une recommandation personnalisée.
+</div>
+
+---
+
+```{r footer}
+#| output: asis
+library(htmltools)
+txt <- sprintf(
+  "<em>Document g&#233;n&#233;r&#233; le %s &mdash; R&nbsp;%s &mdash; quantmod&nbsp;%s &mdash; PerformanceAnalytics&nbsp;%s &mdash; ggplot2&nbsp;%s &mdash; plotly&nbsp;%s</em>",
+  format(Sys.time(), "%d/%m/%Y &#224; %H:%M"),
+  paste(R.version$major, R.version$minor, sep="."),
+  as.character(packageVersion("quantmod")),
+  as.character(packageVersion("PerformanceAnalytics")),
+  as.character(packageVersion("ggplot2")),
+  as.character(packageVersion("plotly")))
+cat(as.character(HTML(paste0(
+  "<hr><p style='font-size:.8rem;color:#6c757d;text-align:center;'>", txt, "</p>"
+))))
+```
