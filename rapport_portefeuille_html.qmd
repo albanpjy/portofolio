@@ -439,19 +439,53 @@ make_monthly_heatmap <- function(prices_xts, ticker_name, max_years = 12) {
           legend.key.height = unit(0.9, "cm"))
 }
 
-# ── Score global /10 ─────────────────────────────────────────────────
-# Composite : 40 % Sharpe + 30 % rendement + 20 % volatilité + 10 % max DD
-score_tk <- function(tk) {
-  r <- tryCatch(na.omit(all_ptfl[, tk]), error = function(e) NULL)
-  if (is.null(r) || length(r) < 20) return(NA_real_)
+# ── Métriques de performance/risque — fonction UNIQUE et centralisée ──
+# Toutes les statistiques du rapport (fiches, tableaux, graphiques, score)
+# passent par cette fonction pour garantir des formules identiques partout.
+# En particulier :
+#  - Le ratio de Sharpe est TOUJOURS annualisé ici. `PerformanceAnalytics::SharpeRatio()`
+#    retourne par défaut un ratio NON annualisé (journalier) si `annualize=TRUE` n'est
+#    pas précisé — un piège classique qui, utilisé par endroits et pas par d'autres,
+#    ferait apparaître deux valeurs de Sharpe différentes (d'un facteur √252) pour un
+#    même instrument selon la section du rapport consultée.
+#  - Le ratio de Sortino suit exactement la formule de la section théorique
+#    (semi-écart-type annualisé par rapport au taux sans risque journalier).
+compute_metrics <- function(r) {
+  r <- na.omit(r)
+  n <- length(r)
+  if (n < 20) return(NULL)
+
   ra <- as.numeric(Return.annualized(r, scale = 252))
   va <- as.numeric(StdDev.annualized(r, scale = 252))
-  md <- as.numeric(maxDrawdown(r))
   sr <- (ra - RF_AN) / va
-  round(min(10, max(0, (sr + .5) * 7)) * .40 +
-        min(10, max(0, ra * 60))       * .30 +
-        max(0, 10 - va * 30)           * .20 +
-        max(0, 10 - md * 15)           * .10, 1)
+
+  dd_ann <- sqrt(252 * mean(pmin(as.numeric(r) - RF_DAILY, 0)^2))
+  so <- (ra - RF_AN) / dd_ann
+
+  md  <- as.numeric(maxDrawdown(r))
+  v95 <- abs(as.numeric(VaR(r, p = .95, method = "historical")))
+  c95 <- abs(as.numeric(ES(r,  p = .95, method = "historical")))
+  sk  <- moments::skewness(as.numeric(r))
+  ku  <- moments::kurtosis(as.numeric(r))
+
+  list(n = n, ra = ra, va = va, sr = sr, so = so, md = md,
+       v95 = v95, c95 = c95, sk = sk, ku = ku,
+       date_debut = as.Date(index(r)[1]), date_fin = as.Date(index(r)[n]))
+}
+
+# ── Score global /10 ─────────────────────────────────────────────────
+# Composite : 40 % Sharpe + 30 % rendement + 20 % volatilité + 10 % max DD
+# Calculé sur l'historique COMPLET propre à l'instrument (rets_full), pas sur
+# l'intersection commune aux 15 titres, qui tronquerait à tort l'analyse des
+# instruments les plus anciens à la date de cotation du plus récent du catalogue.
+score_tk <- function(tk) {
+  r <- tryCatch(rets_full[[tk]], error = function(e) NULL)
+  m <- compute_metrics(r)
+  if (is.null(m)) return(NA_real_)
+  round(min(10, max(0, (m$sr + .5) * 7)) * .40 +
+        min(10, max(0, m$ra * 60))       * .30 +
+        max(0, 10 - m$va * 30)           * .20 +
+        max(0, 10 - m$md * 15)           * .10, 1)
 }
 ```
 
@@ -500,19 +534,42 @@ ptfl_list <- setNames(
 )
 ptfl_list <- Filter(Negate(is.null), ptfl_list)
 
-# Calcul des rendements logarithmiques journaliers
-# log(P_t / P_{t-1}) = log(1 + r_t) ≈ r_t pour de petites variations
+# Calcul des rendements SIMPLES (arithmétiques) journaliers
+# r_t = P_t / P_{t-1} - 1
+# NB : on utilise volontairement des rendements simples et non logarithmiques.
+# Les rendements log ne sont PAS compatibles avec Return.annualized(), maxDrawdown()
+# ou tout cumprod(1+r) — ces fonctions reconstruisent un indice de prix en supposant
+# que (1+r_t) est le facteur de croissance, ce qui n'est vrai que pour des rendements
+# simples (pour un rendement log, le facteur de croissance est exp(r_t)).
 rets_l <- lapply(names(ptfl_list), function(nm) {
-  r <- tryCatch(dailyReturn(Ad(ptfl_list[[nm]]), type = "log"), error = function(e) NULL)
+  r <- tryCatch(dailyReturn(Ad(ptfl_list[[nm]]), type = "arithmetic"), error = function(e) NULL)
   if (!is.null(r)) colnames(r) <- nm
   r
 })
 rets_l   <- Filter(Negate(is.null), rets_l)
 # Fusion sur les dates communes (inner join) et suppression des NA
+# ATTENTION : cette intersection restreint la période à la date de départ du titre
+# le plus RÉCEMMENT coté du catalogue (ex. PANX.PA / PAEEM.PA, cotés depuis 2019),
+# quelle que soit la valeur de DATE_DEBUT. Ce jeu de données n'est donc utilisé que
+# pour les calculs qui exigent des dates communes à plusieurs actifs (corrélations,
+# optimisation Markowitz, backtest des portefeuilles combinés). Pour les statistiques
+# propres à un seul instrument, on utilise `rets_full` ci-dessous (historique complet
+# individuel), afin de ne pas tronquer artificiellement l'analyse de chaque titre.
 all_ptfl <- na.omit(Reduce(function(a, b) merge(a, b, join = "inner"), rets_l))
 
-# Fenêtres temporelles de calcul
+# Fenêtres temporelles de calcul (période réellement commune à tous les instruments)
 ptfl_w <- window(all_ptfl, start = as.Date(DATE_DEBUT))
+PERIODE_COMMUNE_DEBUT <- as.Date(min(index(ptfl_w)))
+PERIODE_COMMUNE_FIN   <- as.Date(max(index(ptfl_w)))
+
+# ── Rendements sur l'historique COMPLET propre à chaque instrument ──────
+# (pas d'intersection : chaque série garde toute la profondeur disponible)
+rets_full <- setNames(lapply(names(ptfl_list), function(nm) {
+  r <- tryCatch(dailyReturn(Ad(ptfl_list[[nm]]), type = "arithmetic"), error = function(e) NULL)
+  if (!is.null(r)) { colnames(r) <- nm; r <- na.omit(r) }
+  r
+}), names(ptfl_list))
+rets_full <- Filter(Negate(is.null), rets_full)
 ```
 
 ---
@@ -526,7 +583,12 @@ Ce document analyse **`r length(CATALOGUE)` instruments financiers** couvrant ET
 
 **`r sum(sapply(CATALOGUE, "[[", "pea"))` instruments sur `r length(CATALOGUE)`** sont éligibles au PEA.
 
-**Sources :** Yahoo Finance via `quantmod` · **Période :** `r format(as.Date(DATE_DEBUT), "%d/%m/%Y")` → `r format(DATE_FIN, "%d/%m/%Y")` · **Taux sans risque :** `r RF_AN*100` %
+**Sources :** Yahoo Finance via `quantmod` · **Taux sans risque :** `r RF_AN*100` %
+
+**Deux fenêtres temporelles cohabitent dans ce rapport :**
+
+- Les statistiques **propres à chaque instrument** (fiches, tableaux comparatifs, scoring, Sharpe/Sortino/VaR par titre) utilisent l'**historique complet disponible pour ce titre** sur Yahoo Finance — pas de troncature artificielle. La colonne « Depuis » du tableau comparatif indique l'année de départ réelle de chaque série.
+- Les analyses qui nécessitent des dates **communes à plusieurs actifs** (corrélations, frontière efficiente de Markowitz, backtest des portefeuilles combinés) sont calculées sur l'intersection des historiques des `r length(CATALOGUE)` instruments, soit du **`r format(PERIODE_COMMUNE_DEBUT, "%d/%m/%Y")`** au **`r format(PERIODE_COMMUNE_FIN, "%d/%m/%Y")`** — bornée par le titre le plus récemment coté du catalogue (cible initiale : `r format(as.Date(DATE_DEBUT), "%d/%m/%Y")`, non atteignable car certains ETF du catalogue ont été lancés après cette date).
 
 **Note PDF :** Ce rapport est conçu pour l'HTML (graphiques interactifs, tables filtrables). Pour la version PDF, les graphiques Plotly seront remplacés par des équivalents ggplot2 statiques.
 :::
@@ -665,7 +727,7 @@ meta_idx <- function(obj, label, tk) {
   r1j <- (lp - as.numeric(cl[n-1, 1])) / as.numeric(cl[n-1, 1]) * 100
   # Fenêtre 1 an glissant
   s1y <- as.Date(index(cl)[n]) - 365
-  rw  <- dailyReturn(cl, type = "log")
+  rw  <- dailyReturn(cl, type = "arithmetic")
   rw  <- rw[index(rw) >= s1y]
   r1a <- as.numeric(Return.annualized(rw, scale = 252)) * 100
   v1a <- as.numeric(StdDev.annualized(rw, scale = 252)) * 100
@@ -709,9 +771,9 @@ DT::datatable(rows_idx, rownames = FALSE,
 ```{r fig-indices-plotly}
 # Graphique interactif (Plotly) : permet de zoomer, filtrer par légende
 rl_idx <- Filter(Negate(is.null), list(
-  `CAC 40`  = tryCatch({r <- dailyReturn(Ad(cac),   "log"); colnames(r) <- "CAC 40";  r}, error=function(e)NULL),
-  `DAX 40`  = tryCatch({r <- dailyReturn(Ad(dax),   "log"); colnames(r) <- "DAX 40";  r}, error=function(e)NULL),
-  `S&P 500` = tryCatch({r <- dailyReturn(Ad(sp500), "log"); colnames(r) <- "S&P 500"; r}, error=function(e)NULL)
+  `CAC 40`  = tryCatch({r <- dailyReturn(Ad(cac),   "arithmetic"); colnames(r) <- "CAC 40";  r}, error=function(e)NULL),
+  `DAX 40`  = tryCatch({r <- dailyReturn(Ad(dax),   "arithmetic"); colnames(r) <- "DAX 40";  r}, error=function(e)NULL),
+  `S&P 500` = tryCatch({r <- dailyReturn(Ad(sp500), "arithmetic"); colnames(r) <- "S&P 500"; r}, error=function(e)NULL)
 ))
 
 if (length(rl_idx) >= 2) {
@@ -754,7 +816,8 @@ if (length(rl_idx) >= 2) {
 
 # ──────────────────────────────────────────────────────────────────────
 # Génération des fiches HTML pour chaque instrument.
-# Les statistiques sont calculées sur la période commune (all_ptfl).
+# Les statistiques sont calculées sur l'historique COMPLET propre à
+# l'instrument (rets_full), pas sur la période commune aux 15 titres.
 # ──────────────────────────────────────────────────────────────────────
 library(htmltools)
 
@@ -768,13 +831,10 @@ for (cat_name in c("ETF Monde","ETF Technologie","ETF Amérique","ETF Émergents
   for (inst in items) {
     tk    <- inst$ticker
     score <- score_tk(tk)
-    r_tk  <- tryCatch(na.omit(all_ptfl[,tk]), error=function(e)NULL)
+    m     <- compute_metrics(tryCatch(rets_full[[tk]], error=function(e) NULL))
 
-    if (!is.null(r_tk) && length(r_tk) > 20) {
-      ra <- as.numeric(Return.annualized(r_tk, scale=252)) * 100
-      va <- as.numeric(StdDev.annualized(r_tk, scale=252)) * 100
-      sr <- (ra/100 - RF_AN) / (va/100)
-      md <- as.numeric(maxDrawdown(r_tk)) * 100
+    if (!is.null(m)) {
+      ra <- m$ra * 100; va <- m$va * 100; sr <- m$sr; md <- m$md * 100
       chips <- paste0(
         sprintf('<span class="chip %s">Rdt: %+.1f%%</span>',
                 if(ra>=0)"chip-pos" else "chip-neg", ra),
@@ -925,19 +985,13 @@ for (info in CATALOGUE) {
     cat('*Historique insuffisant pour la heatmap mensuelle.*\n\n')
   }
 
-  # ── Statistiques clés (sur toute la période disponible) ───────────
+  # ── Statistiques clés (sur l'historique COMPLET propre à l'instrument) ─
   cat('### Statistiques clés\n\n')
-  r_tk <- tryCatch(na.omit(all_ptfl[, tk]), error=function(e) NULL)
-  if (!is.null(r_tk) && length(r_tk) > 60) {
-    ra  <- as.numeric(Return.annualized(r_tk,  scale=252)) * 100
-    va  <- as.numeric(StdDev.annualized(r_tk,  scale=252)) * 100
-    sr  <- as.numeric(SharpeRatio(r_tk,  Rf=RF_DAILY, FUN="StdDev")[1])
-    so  <- as.numeric(SortinoRatio(r_tk, MAR=RF_DAILY)[1])
-    md  <- as.numeric(maxDrawdown(r_tk)) * 100
-    v95 <- abs(as.numeric(VaR(r_tk, p=.95, method="historical"))) * 100
-    c95 <- abs(as.numeric(ES(r_tk,  p=.95, method="historical"))) * 100
-    sk  <- skewness(as.numeric(r_tk))
-    ku  <- kurtosis(as.numeric(r_tk))
+  m <- compute_metrics(tryCatch(rets_full[[tk]], error=function(e) NULL))
+  if (!is.null(m) && m$n > 60) {
+    ra <- m$ra * 100; va <- m$va * 100; sr <- m$sr; so <- m$so
+    md <- m$md * 100; v95 <- m$v95 * 100; c95 <- m$c95 * 100
+    sk <- m$sk; ku <- m$ku
 
     stats_tbl <- data.frame(
       Indicateur = c("Rendement annualisé","Volatilité annualisée",
@@ -980,36 +1034,34 @@ for (info in CATALOGUE) {
 ```{r tbl-stats-global}
 # ──────────────────────────────────────────────────────────────────────
 # Table comparative : toutes les métriques, triée par score décroissant.
-# Permet de comparer les instruments sur des critères homogènes.
+# Calculée sur l'historique COMPLET propre à chaque instrument (rets_full),
+# pas sur l'intersection commune aux 15 titres — sans quoi un instrument coté
+# depuis 2000 (ex. Air Liquide) se retrouverait analysé sur seulement ~7 ans,
+# la profondeur du titre le plus récemment coté du catalogue (cf. colonne
+# « Depuis », ajoutée pour rendre visible cette hétérogénéité des historiques).
 # ──────────────────────────────────────────────────────────────────────
-rows_s <- do.call(rbind, lapply(colnames(ptfl_w), function(nm) {
-  r  <- na.omit(ptfl_w[, nm])
-  if (length(r) < 20) return(NULL)
-  ra <- as.numeric(Return.annualized(r, scale=252))
-  va <- as.numeric(StdDev.annualized(r, scale=252))
-  sr <- as.numeric(SharpeRatio(r, Rf=RF_DAILY, FUN="StdDev")[1])
-  so <- as.numeric(SortinoRatio(r, MAR=RF_DAILY)[1])
-  md <- as.numeric(maxDrawdown(r))
-  v5 <- abs(as.numeric(VaR(r, p=.95, method="historical")))
-  c5 <- abs(as.numeric(ES(r,  p=.95, method="historical")))
+rows_s <- do.call(rbind, lapply(names(rets_full), function(nm) {
+  m <- compute_metrics(rets_full[[nm]])
+  if (is.null(m)) return(NULL)
   ii <- Filter(function(x) x$ticker == nm, CATALOGUE)
   data.frame(
     Instrument = NOMS[nm],
     PEA        = if(length(ii)>0 && ii[[1]]$pea) "✅" else "🔵",
-    `Rdt ann.` = sprintf("%+.1f%%", ra*100),
-    `Vol. ann.`= sprintf("%.1f%%",  va*100),
-    Sharpe     = round(sr, 2),
-    Sortino    = round(so, 2),
-    `Max DD`   = sprintf("%.1f%%",  md*100),
-    `VaR 95%`  = sprintf("%.2f%%",  v5*100),
-    `CVaR 95%` = sprintf("%.2f%%",  c5*100),
+    Depuis     = format(m$date_debut, "%Y"),
+    `Rdt ann.` = sprintf("%+.1f%%", m$ra*100),
+    `Vol. ann.`= sprintf("%.1f%%",  m$va*100),
+    Sharpe     = round(m$sr, 2),
+    Sortino    = round(m$so, 2),
+    `Max DD`   = sprintf("%.1f%%",  m$md*100),
+    `VaR 95%`  = sprintf("%.2f%%",  m$v95*100),
+    `CVaR 95%` = sprintf("%.2f%%",  m$c95*100),
     Score      = score_tk(nm),
     check.names = FALSE
   )
 }))
 
 DT::datatable(rows_s, rownames=FALSE, filter="top",
-  options=list(pageLength=15, dom="tip", order=list(list(9,"desc"))),
+  options=list(pageLength=15, dom="tip", order=list(list(10,"desc"))),
   class="compact stripe hover") |>
   DT::formatStyle("Rdt ann.",
     color=DT::styleInterval(0, c("#d62728","#2ca02c")), fontWeight="bold") |>
@@ -1030,15 +1082,16 @@ DT::datatable(rows_s, rownames=FALSE, filter="top",
 # théorique partant du taux sans risque. Les instruments au-dessus
 # ont un meilleur Sharpe.
 # ──────────────────────────────────────────────────────────────────────
-rr_df <- do.call(rbind, lapply(seq_along(colnames(ptfl_w)), function(i) {
-  nm <- colnames(ptfl_w)[i]
-  r  <- na.omit(ptfl_w[, nm])
+rr_df <- do.call(rbind, lapply(seq_along(names(rets_full)), function(i) {
+  nm <- names(rets_full)[i]
+  m  <- compute_metrics(rets_full[[nm]])
+  if (is.null(m)) return(NULL)
   ii <- Filter(function(x) x$ticker==nm, CATALOGUE)
   data.frame(
     Instrument = NOMS[nm],
     Catégorie  = if(length(ii)>0) ii[[1]]$cat else "Autre",
-    Vol  = as.numeric(StdDev.annualized(r, scale=252)) * 100,
-    Rdt  = as.numeric(Return.annualized(r, scale=252)) * 100,
+    Vol  = m$va * 100,
+    Rdt  = m$ra * 100,
     Col  = PAL[i],
     stringsAsFactors = FALSE
   )
@@ -1072,8 +1125,8 @@ ggplot(rr_df, aes(x=Vol, y=Rdt, color=Catégorie)) +
   )) +
   labs(
     title    = "Espace rendement / risque — tous instruments",
-    subtitle = sprintf("Période : %s → %s | Rf = %.1f %% | Taille des points proportionnelle au Sharpe",
-                       format(as.Date(DATE_DEBUT),"%Y"), format(DATE_FIN,"%Y"), RF_AN*100),
+    subtitle = sprintf("Chaque instrument sur son historique complet disponible | Rf = %.1f %%",
+                       RF_AN*100),
     x = "Volatilité annualisée (%)",
     y = "Rendement annualisé (%)",
     color = "Catégorie",
@@ -1114,8 +1167,8 @@ ggplot(cm_long, aes(x=Var1, y=Var2, fill=Corr)) +
   scale_color_manual(values=c("black","white"), guide="none") +
   labs(
     title    = "Matrice de corrélation — rendements journaliers",
-    subtitle = sprintf("Période %s–%s | Bleu = corrélation positive | Rouge = corrélation négative",
-                       format(as.Date(DATE_DEBUT),"%Y"), format(DATE_FIN,"%Y")),
+    subtitle = sprintf("Période commune %s–%s | Bleu = corrélation positive | Rouge = corrélation négative",
+                       format(PERIODE_COMMUNE_DEBUT,"%Y"), format(PERIODE_COMMUNE_FIN,"%Y")),
     x=NULL, y=NULL,
     caption  = "Corrélation faible entre deux actifs = meilleure diversification du portefeuille"
   ) +
@@ -1134,12 +1187,13 @@ ggplot(cm_long, aes(x=Var1, y=Var2, fill=Corr)) +
 # Le Max Drawdown représente la plus grande perte subie depuis un sommet.
 # Un MDD de -50 % nécessite un gain de +100 % pour récupérer.
 # ──────────────────────────────────────────────────────────────────────
-dd_df <- do.call(rbind, lapply(seq_along(colnames(ptfl_w)), function(i) {
-  nm  <- colnames(ptfl_w)[i]
-  r   <- na.omit(ptfl_w[, nm])
+dd_df <- do.call(rbind, lapply(seq_along(names(rets_full)), function(i) {
+  nm <- names(rets_full)[i]
+  m  <- compute_metrics(rets_full[[nm]])
+  if (is.null(m)) return(NULL)
   data.frame(
     Inst = NOMS[nm],
-    DD   = as.numeric(maxDrawdown(r)) * 100,
+    DD   = m$md * 100,
     Col  = PAL[i]
   )
 })) |> dplyr::arrange(desc(DD))
@@ -1157,8 +1211,7 @@ ggplot(dd_df, aes(x=reorder(Inst, -DD), y=-DD, fill=couleur)) +
   coord_flip() +
   labs(
     title    = "Max Drawdown historique — tous instruments",
-    subtitle = sprintf("Période %s–%s | Vert < 30 %% · Orange 30–50 %% · Rouge > 50 %%",
-                       format(as.Date(DATE_DEBUT),"%Y"), format(DATE_FIN,"%Y")),
+    subtitle = "Chaque instrument sur son historique complet disponible | Vert < 30 % · Orange 30–50 % · Rouge > 50 %",
     x = NULL, y = "Max Drawdown (%)",
     caption  = "Max Drawdown = pire perte consécutive depuis un sommet historique"
   ) +
@@ -1169,11 +1222,10 @@ ggplot(dd_df, aes(x=reorder(Inst, -DD), y=-DD, fill=couleur)) +
 
 ```{r fig-sharpe-ggplot}
 #| fig-height: 6
-sv_df <- do.call(rbind, lapply(colnames(ptfl_w), function(nm) {
-  r   <- na.omit(ptfl_w[, nm])
-  sr  <- (as.numeric(Return.annualized(r,scale=252)) - RF_AN) /
-           as.numeric(StdDev.annualized(r,scale=252))
-  data.frame(Inst=NOMS[nm], Sharpe=round(sr,3), stringsAsFactors=FALSE)
+sv_df <- do.call(rbind, lapply(names(rets_full), function(nm) {
+  m <- compute_metrics(rets_full[[nm]])
+  if (is.null(m)) return(NULL)
+  data.frame(Inst=NOMS[nm], Sharpe=round(m$sr,3), stringsAsFactors=FALSE)
 })) |> dplyr::arrange(Sharpe)
 
 sv_df$couleur <- ifelse(sv_df$Sharpe >= 0.5, "#1a9641",
@@ -1208,9 +1260,9 @@ ggplot(sv_df, aes(x=reorder(Inst, Sharpe), y=Sharpe, fill=couleur)) +
 # Vue d'ensemble des rendements année par année pour chaque instrument.
 # Permet d'identifier les années exceptionnelles et les crises.
 # ──────────────────────────────────────────────────────────────────────
-ann_df <- do.call(rbind, lapply(colnames(ptfl_w), function(nm) {
-  r <- na.omit(ptfl_w[, nm])
-  # Agrégation annuelle : produit des rendements journaliers
+ann_df <- do.call(rbind, lapply(names(rets_full), function(nm) {
+  r <- rets_full[[nm]]
+  # Agrégation annuelle : produit des rendements journaliers (historique complet)
   r_ann <- apply.yearly(r, function(x) (prod(1 + x) - 1) * 100)
   data.frame(
     Ticker = NOMS[nm],
@@ -1300,14 +1352,18 @@ fig_rc |>
 
 ## Frontière efficiente — Simulation Monte Carlo
 
-::: {.callout-note}
+:::: {.callout-note}
 ## Méthode de simulation
 
 Nous simulons **8 000 portefeuilles aléatoires** en tirant des vecteurs de pondérations uniformes sur le simplexe ($w_i \geq 0$, $\sum w_i = 1$). Chaque portefeuille est représenté dans l'espace (volatilité, rendement), coloré par son ratio de Sharpe. Les deux portefeuilles optimaux identifiés :
 
 - **Triangle rouge :** Variance Minimale (MVP) — minimise le risque
 - **Carré bleu :** Sharpe Maximal (MSP) — maximise le rendement par unité de risque
+
+::: {.callout-tip}
+**Pourquoi les rendements affichés ici diffèrent légèrement de ceux du tableau comparatif ?** L'optimisation de Markowitz combine les actifs par une **moyenne arithmétique** des rendements journaliers (c'est la définition même du rendement d'un portefeuille : $R_p=\mathbf{w}^\top\boldsymbol{\mu}$), alors que le reste du rapport affiche le **rendement annualisé composé (CAGR)**, systématiquement un peu inférieur à la moyenne arithmétique pour un actif volatil. Les deux mesures sont correctes, mais répondent à des questions différentes : l'une sert à l'optimisation, l'autre décrit la performance réellement obtenue.
 :::
+::::
 
 ```{r fig-frontier}
 #| fig-height: 7
@@ -1457,12 +1513,9 @@ ggplot(wt_df, aes(x=reorder(Instrument, -Poids), y=Poids, fill=Portefeuille)) +
 sc_tbl <- do.call(rbind, lapply(CATALOGUE, function(inst) {
   tk    <- inst$ticker
   score <- score_tk(tk)
-  r_tk  <- tryCatch(na.omit(ptfl_w[,tk]), error=function(e)NULL)
-  if (!is.null(r_tk) && length(r_tk)>20) {
-    ra <- as.numeric(Return.annualized(r_tk,scale=252))*100
-    va <- as.numeric(StdDev.annualized(r_tk,scale=252))*100
-    sr <- (ra/100-RF_AN)/(va/100)
-    md <- as.numeric(maxDrawdown(r_tk))*100
+  m     <- compute_metrics(tryCatch(rets_full[[tk]], error=function(e) NULL))
+  if (!is.null(m)) {
+    ra <- m$ra*100; va <- m$va*100; sr <- m$sr; md <- m$md*100
   } else ra <- va <- sr <- md <- NA
 
   rec <- if(!is.na(score)) {
@@ -1680,7 +1733,7 @@ html_conclu <- paste0(
 cat(as.character(HTML(html_conclu)))
 ```
 
-Sur la période analysée (**`r format(as.Date(DATE_DEBUT),"%Y")` – `r format(DATE_FIN,"%Y")`**), les enseignements structurels sont les suivants :
+Sur les historiques analysés (historique complet par instrument, jusqu'à `r format(DATE_FIN,"%Y")` ; analyse combinée sur **`r format(PERIODE_COMMUNE_DEBUT,"%Y")` – `r format(PERIODE_COMMUNE_FIN,"%Y")`**), les enseignements structurels sont les suivants :
 
 **ETF — la base indispensable**
 Le **CW8** reste la pierre angulaire d'un portefeuille passif (TER 0,12 %, PEA, diversification mondiale). Le **PANX** est un excellent moteur de performance à limiter à 20–30 % du portefeuille total.
