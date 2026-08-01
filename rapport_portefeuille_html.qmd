@@ -180,13 +180,27 @@ CATALOGUE <- list(
        pros=c("P/E attractif ~12x","Éligible PEA","Croissance structurelle LT"),
        cons=c("Risque géopolitique Chine","Volatilité plus haute","Risque réglementaire")),
 
-  list(ticker="SGLD.PA", nom="Invesco Physical Gold ETC", cat="Or",
-       pea=FALSE, ter=0.12, conv=4, rsk=3,
-       desc=paste0("Or physique certifié LBMA, stocké dans des coffres sécurisés. ",
+  # NB : la cotation Paris historique (SGLD.PA) renvoie une erreur 404 sur le
+  # flux Yahoo Finance (fonds probablement radié de cette place ou changement
+  # de flux côté fournisseur — vérifié en direct, pas une erreur de code).
+  # Un premier remplacement par 8PSG.DE (même fonds Invesco, coté Xetra) s'est
+  # révélé avoir un flux de prix corrompu chez ce fournisseur (des dizaines de
+  # pics isolés à +30/-25 % sur une seule séance, qui reviennent le lendemain —
+  # une anomalie de données, pas un vrai mouvement de marché : la volatilité
+  # annualisée calculée dessus explosait artificiellement à ~65 %/an, très loin
+  # des ~13-16 % attendus pour l'or). On utilise donc à la place Xetra-Gold
+  # (4GLD.DE), l'un des ETC or les plus liquides d'Europe, dont l'historique
+  # Yahoo est propre (vérifié : aucun mouvement journalier > 15 % depuis 2009).
+  list(ticker="4GLD.DE", nom="Xetra-Gold", cat="Or",
+       pea=FALSE, ter=0, conv=4, rsk=3,
+       desc=paste0("Or physique certifié LBMA, livrable sur demande, structuré en obligation ",
+                   "au porteur (Deutsche Börse Commodities) plutôt qu'en fonds classique — ",
+                   "l'un des supports or les plus liquides et les plus suivis d'Europe. ",
                    "Valeur refuge millénaire : corrélation quasi nulle (voire négative en crise) aux actions. ",
-                   "TER minimal à 0,12 %. Protège l'inflation et les crises systémiques."),
-       pros=c("Corrélation ~0 aux actions","Valeur refuge prouvée","TER 0,12 %"),
-       cons=c("Non éligible PEA","Aucun dividende","Volatilité ~16 %/an")),
+                   "Pas de frais de gestion annuels récurrents (structure obligataire). ",
+                   "Coté sur Xetra (Deutsche Börse), en EUR."),
+       pros=c("Corrélation ~0 aux actions","Très forte liquidité","Pas de frais de gestion annuels"),
+       cons=c("Non éligible PEA","Aucun dividende","Volatilité ~15 %/an")),
 
   # ── Actions françaises (10) — toutes PEA, historique ≥ 15 ans ─────
   list(ticker="AI.PA", nom="Air Liquide", cat="Industrie",
@@ -494,6 +508,10 @@ score_tk <- function(tk) {
 # TÉLÉCHARGEMENT DES DONNÉES (Yahoo Finance via quantmod)
 # getSymbols retourne les données OHLCV ajustées (dividendes + splits)
 # ══════════════════════════════════════════════════════════════════════
+# Échecs de téléchargement — enregistrés ici pour être affichés dans le rapport
+# lui-même (pas seulement via message(), invisible car opts_chunk$message=FALSE).
+DL_ECHECS <- character(0)
+
 dl <- function(tk, from = DATE_DEBUT) {
   # Nettoie le ticker pour en faire un nom de variable R valide
   clean <- gsub("[\\^=\\.\\-]", "", tk)
@@ -502,7 +520,7 @@ dl <- function(tk, from = DATE_DEBUT) {
                       auto.assign = FALSE, warnings = FALSE)
     assign(clean, obj, envir = globalenv())
   }, error = function(e) {
-    message(sprintf("  ⚠ Impossible de télécharger %s : %s", tk, conditionMessage(e)))
+    DL_ECHECS <<- c(DL_ECHECS, sprintf("%s (%s)", tk, conditionMessage(e)))
     NULL
   })
 }
@@ -541,11 +559,11 @@ ptfl_list <- Filter(Negate(is.null), ptfl_list)
 # ou tout cumprod(1+r) — ces fonctions reconstruisent un indice de prix en supposant
 # que (1+r_t) est le facteur de croissance, ce qui n'est vrai que pour des rendements
 # simples (pour un rendement log, le facteur de croissance est exp(r_t)).
-rets_l <- lapply(names(ptfl_list), function(nm) {
+rets_l <- setNames(lapply(names(ptfl_list), function(nm) {
   r <- tryCatch(dailyReturn(Ad(ptfl_list[[nm]]), type = "arithmetic"), error = function(e) NULL)
   if (!is.null(r)) colnames(r) <- nm
   r
-})
+}), names(ptfl_list))
 rets_l   <- Filter(Negate(is.null), rets_l)
 # Fusion sur les dates communes (inner join) et suppression des NA
 # ATTENTION : cette intersection restreint la période à la date de départ du titre
@@ -556,6 +574,11 @@ rets_l   <- Filter(Negate(is.null), rets_l)
 # propres à un seul instrument, on utilise `rets_full` ci-dessous (historique complet
 # individuel), afin de ne pas tronquer artificiellement l'analyse de chaque titre.
 all_ptfl <- na.omit(Reduce(function(a, b) merge(a, b, join = "inner"), rets_l))
+# merge.xts sanitise les noms de colonnes non syntaxiques via make.names() —
+# un ticker commençant par un chiffre (ex. "4GLD.DE") ressortirait renommé
+# "X8PSG.DE", cassant silencieusement tous les lookups par nom en aval
+# (NOMS[...], corrélations, optimisation). On restaure les noms d'origine.
+colnames(all_ptfl) <- names(rets_l)
 
 # Fenêtres temporelles de calcul (période réellement commune à tous les instruments)
 ptfl_w <- window(all_ptfl, start = as.Date(DATE_DEBUT))
@@ -570,6 +593,47 @@ rets_full <- setNames(lapply(names(ptfl_list), function(nm) {
   r
 }), names(ptfl_list))
 rets_full <- Filter(Negate(is.null), rets_full)
+
+# Titre(s) dont la date de cotation détermine à elle seule PERIODE_COMMUNE_DEBUT
+# (le(s) plus récemment coté(s) du catalogue) — calculé dynamiquement plutôt
+# que codé en dur, pour rester correct si le catalogue change.
+starts_all <- sapply(rets_full, function(r) as.Date(index(r)[1]))
+tk_binding <- names(starts_all)[starts_all == max(starts_all)]
+
+# Petite liste à la française : "A", "A et B", "A, B et C"...
+fr_join <- function(x) {
+  if (length(x) <= 1) return(paste(x, collapse=""))
+  paste(paste(head(x, -1), collapse=", "), tail(x, 1), sep=" et ")
+}
+
+# ── Union de toutes les dates (outer join, avec NA) ─────────────────────
+# Sert au calcul de corrélations "pairwise" : chaque PAIRE de titres utilise
+# sa propre période de recouvrement maximale (via use="pairwise.complete.obs"),
+# au lieu d'être bridée par le titre le plus récemment coté du catalogue comme
+# le fait `all_ptfl` (join="inner"). Concrètement : la corrélation Air Liquide
+# / Sanofi redevient calculable depuis 2008, même si PANX/PAEEM n'existent que
+# depuis 2019 — seules les paires IMPLIQUANT PANX ou PAEEM restent bridées à
+# leur propre date de cotation, ce qui est correct puisqu'aucune donnée
+# n'existe avant pour ces titres.
+all_ptfl_union <- Reduce(function(a, b) merge(a, b, join = "outer"), rets_full)
+colnames(all_ptfl_union) <- names(rets_full)   # cf. note make.names() ci-dessus
+
+# ── Sous-univers disposant d'un historique long (avant 2010) ────────────
+# Permet de recalculer corrélations/frontière efficiente sur une fenêtre
+# couvrant réellement la crise de 2008 et le krach Covid de 2020, en excluant
+# les ETF les plus récemment lancés du catalogue (qui n'existaient pas encore
+# et ne peuvent structurellement pas y figurer). Seuil fixé à 2010 (et non
+# 2015) car PUST.PA (S&P 500), bien que plus ancien que PANX/PAEEM, n'est
+# lui-même coté que depuis 2014 — l'inclure aurait à nouveau bridé toute
+# l'intersection à 2014 au lieu de 2008/2009.
+LONG_CUTOFF   <- as.Date("2010-01-01")
+tk_long       <- names(rets_full)[sapply(rets_full, function(r) as.Date(index(r)[1]) <= LONG_CUTOFF)]
+tk_recent     <- setdiff(names(rets_full), tk_long)
+all_ptfl_long <- na.omit(Reduce(function(a, b) merge(a, b, join = "inner"), rets_full[tk_long]))
+colnames(all_ptfl_long) <- tk_long             # cf. note make.names() ci-dessus
+ptfl_w_long   <- window(all_ptfl_long, start = as.Date(DATE_DEBUT))
+PERIODE_LONGUE_DEBUT <- as.Date(min(index(ptfl_w_long)))
+PERIODE_LONGUE_FIN   <- as.Date(max(index(ptfl_w_long)))
 ```
 
 ---
@@ -592,6 +656,23 @@ Ce document analyse **`r length(CATALOGUE)` instruments financiers** couvrant ET
 
 **Note PDF :** Ce rapport est conçu pour l'HTML (graphiques interactifs, tables filtrables). Pour la version PDF, les graphiques Plotly seront remplacés par des équivalents ggplot2 statiques.
 :::
+
+```{r warn-dl-echecs}
+#| output: asis
+# Affiche un avertissement VISIBLE (pas juste un message() console, invisible
+# à la lecture du rapport puisque opts_chunk$message=FALSE) si un instrument
+# n'a pas pu être téléchargé — pour éviter qu'un ticker cassé passe inaperçu
+# et fausse silencieusement le nombre d'instruments réellement analysés.
+if (length(DL_ECHECS) > 0) {
+  cat(paste0(
+    '\n::: {.callout-important}\n',
+    '**', length(DL_ECHECS), ' échec(s) de téléchargement Yahoo Finance** — ',
+    'les instruments suivants sont absents de ce rendu du rapport :\n\n',
+    paste0('- ', DL_ECHECS, collapse = "\n"),
+    '\n:::\n\n'
+  ))
+}
+```
 
 ## Les indicateurs fondamentaux de performance
 
@@ -1146,9 +1227,18 @@ ggplot(rr_df, aes(x=Vol, y=Rdt, color=Catégorie)) +
 # La corrélation mesure le co-mouvement entre -1 (parfaitement inversés)
 # et +1 (parfaitement liés). Des corrélations faibles entre actifs
 # permettent de réduire le risque de portefeuille (diversification).
+#
+# On calcule ici chaque corrélation en "pairwise complete" sur `all_ptfl_union`
+# (union de toutes les dates, avec NA) plutôt qu'en "complete.obs" sur
+# l'intersection commune (`ptfl_w`). Résultat : chaque PAIRE de titres utilise
+# sa propre période de recouvrement maximale — la case Air Liquide/Sanofi
+# redevient calculée depuis 2008, et non depuis 2019 (date de cotation de
+# PANX/PAEEM, sans rapport avec ces deux titres). Seules les cases impliquant
+# PANX ou PAEEM restent bornées à leur date de cotation réelle (2019), ce qui
+# est correct : aucune donnée n'existe avant pour ces instruments.
 # ──────────────────────────────────────────────────────────────────────
-tks_ord <- PTFL_TICKERS[PTFL_TICKERS %in% colnames(ptfl_w)]
-cm      <- cor(coredata(ptfl_w[, tks_ord]), use="complete.obs")
+tks_ord <- PTFL_TICKERS[PTFL_TICKERS %in% colnames(all_ptfl_union)]
+cm      <- cor(coredata(all_ptfl_union[, tks_ord]), use="pairwise.complete.obs")
 labs_c  <- NOMS[tks_ord]
 rownames(cm) <- colnames(cm) <- labs_c
 
@@ -1167,8 +1257,7 @@ ggplot(cm_long, aes(x=Var1, y=Var2, fill=Corr)) +
   scale_color_manual(values=c("black","white"), guide="none") +
   labs(
     title    = "Matrice de corrélation — rendements journaliers",
-    subtitle = sprintf("Période commune %s–%s | Bleu = corrélation positive | Rouge = corrélation négative",
-                       format(PERIODE_COMMUNE_DEBUT,"%Y"), format(PERIODE_COMMUNE_FIN,"%Y")),
+    subtitle = "Chaque paire sur son recouvrement maximal (depuis 2008 pour la plupart, depuis 2019 pour PANX/PAEEM) | Bleu = positive | Rouge = négative",
     x=NULL, y=NULL,
     caption  = "Corrélation faible entre deux actifs = meilleure diversification du portefeuille"
   ) +
@@ -1305,25 +1394,26 @@ ggplot(ann_df, aes(x=factor(Annee), y=Ticker, fill=Rdt)) +
 # ──────────────────────────────────────────────────────────────────────
 pairs_corr <- list(
   list(a="CW8.PA",  b="PANX.PA", l="CW8 / Nasdaq"),
-  list(a="CW8.PA",  b="SGLD.PA", l="CW8 / Or"),
+  list(a="CW8.PA",  b="4GLD.DE", l="CW8 / Or"),
   list(a="CW8.PA",  b="SAN.PA",  l="CW8 / Sanofi"),
   list(a="MC.PA",   b="KER.PA",  l="LVMH / Kering"),
   list(a="TTE.PA",   b="BNP.PA",  l="TotalE / BNP")
 )
 # Filtrage des paires dont les deux membres sont disponibles
 pairs_corr <- Filter(
-  function(p) p$a %in% colnames(all_ptfl) && p$b %in% colnames(all_ptfl),
+  function(p) p$a %in% names(rets_full) && p$b %in% names(rets_full),
   pairs_corr
 )
 
 cols_rc <- c("#2c7bb6","#d4af37","#1a9641","#d7191c","#762a83")
 fig_rc  <- plot_ly(type="scatter", mode="lines")
 
+# Chaque paire est calculée sur SON PROPRE recouvrement (via rets_full), et non
+# sur all_ptfl (bridé à 2019 par PANX/PAEEM) : les paires n'impliquant pas ces
+# deux ETF récents affichent donc leur historique réel, depuis 2008/2009.
 for (k in seq_along(pairs_corr)) {
   p  <- pairs_corr[[k]]
-  m  <- na.omit(merge(
-    window(all_ptfl[,p$a], start=as.Date(DATE_DEBUT)),
-    window(all_ptfl[,p$b], start=as.Date(DATE_DEBUT)), join="inner"))
+  m  <- na.omit(merge(rets_full[[p$a]], rets_full[[p$b]], join="inner"))
   rc <- rollapply(m, 60, FUN=function(x) cor(x[,1],x[,2],use="complete.obs"),
                   by.column=FALSE, align="right")
   fig_rc <- add_trace(fig_rc, x=as.Date(index(rc)), y=as.numeric(rc),
@@ -1365,71 +1455,99 @@ Nous simulons **8 000 portefeuilles aléatoires** en tirant des vecteurs de pond
 :::
 ::::
 
-```{r fig-frontier}
-#| fig-height: 7
-pc   <- na.omit(coredata(ptfl_w))
-na_n <- ncol(pc)
-mu_v <- colMeans(pc) * 252     # Rendements espérés annualisés
-cov_m<- cov(pc) * 252          # Matrice de covariance annualisée
+```{r fn-frontier}
+# ── Simulation Monte Carlo de la frontière efficiente — fonction réutilisable
+# Appelée deux fois : univers complet (15 titres, période récente commune) et
+# sous-univers longue période (13 titres, depuis 2008, hors PANX/PAEEM).
+run_frontier <- function(pw, seed = 42, N_sim = 8000) {
+  pc    <- na.omit(coredata(pw))
+  na_n  <- ncol(pc)
+  mu_v  <- colMeans(pc) * 252     # Rendements espérés annualisés
+  cov_m <- cov(pc) * 252          # Matrice de covariance annualisée
 
-set.seed(42)
-N_sim <- 8000
-sr_v  <- rv <- vv <- numeric(N_sim)
-sw    <- matrix(0, N_sim, na_n)
+  set.seed(seed)
+  sr_v <- rv <- vv <- numeric(N_sim)
+  sw   <- matrix(0, N_sim, na_n)
 
-for (i in seq_len(N_sim)) {
-  # Tirage uniforme sur le simplexe (poids positifs, somme = 1)
-  w      <- runif(na_n); w <- w / sum(w)
-  rp     <- sum(w * mu_v)
-  vp     <- sqrt(as.numeric(t(w) %*% cov_m %*% w))
-  rv[i]  <- rp; vv[i] <- vp
-  sr_v[i]<- (rp - RF_AN) / vp
-  sw[i,] <- w
+  for (i in seq_len(N_sim)) {
+    # Tirage uniforme sur le simplexe (poids positifs, somme = 1)
+    w       <- runif(na_n); w <- w / sum(w)
+    rp      <- sum(w * mu_v)
+    vp      <- sqrt(as.numeric(t(w) %*% cov_m %*% w))
+    rv[i]   <- rp; vv[i] <- vp
+    sr_v[i] <- (rp - RF_AN) / vp
+    sw[i, ] <- w
+  }
+
+  imv <- which.min(vv)    # Portefeuille Variance Minimale
+  ims <- which.max(sr_v)  # Portefeuille Sharpe Maximal
+
+  ind_df <- data.frame(
+    Inst = NOMS[colnames(pw)],
+    Vol  = sqrt(diag(cov_m)) * 100,
+    Rdt  = mu_v * 100
+  )
+
+  list(rv = rv, vv = vv, sr_v = sr_v, sw = sw, imv = imv, ims = ims,
+       ind_df = ind_df, tickers = colnames(pw))
 }
 
-imv <- which.min(vv)    # Portefeuille Variance Minimale
-ims <- which.max(sr_v)  # Portefeuille Sharpe Maximal
+plot_frontier <- function(f, titre) {
+  plot_ly() |>
+    add_trace(x = f$vv*100, y = f$rv*100, type = "scatter", mode = "markers",
+      marker = list(size = 3, color = f$sr_v,
+        colorscale = list(c(0,"#d7191c"),c(.5,"#fdae61"),c(1,"#1a9641")),
+        opacity = .40, showscale = TRUE,
+        colorbar = list(title = "Sharpe", len = .55, y = .42)),
+      name = "Portefeuilles simulés",
+      hovertemplate = "Vol: %{x:.1f}%<br>Rdt: %{y:+.1f}%<extra></extra>") |>
+    add_trace(data = f$ind_df, x = ~Vol, y = ~Rdt, type = "scatter",
+      mode = "markers+text", text = ~Inst, textposition = "top right",
+      marker = list(size = 8, color = "rgba(40,40,40,.75)", symbol = "x",
+                    line = list(color = "black", width = 1.5)),
+      name = "Instruments seuls",
+      hovertemplate = "%{text}<br>Vol: %{x:.1f}%<br>Rdt: %{y:+.1f}%<extra></extra>") |>
+    add_trace(x = f$vv[f$imv]*100, y = f$rv[f$imv]*100, type = "scatter", mode = "markers",
+      marker = list(size = 15, color = "#d7191c", symbol = "triangle-up",
+                    line = list(color = "white", width = 2)),
+      name = sprintf("Min Variance (Sharpe=%.2f)", f$sr_v[f$imv])) |>
+    add_trace(x = f$vv[f$ims]*100, y = f$rv[f$ims]*100, type = "scatter", mode = "markers",
+      marker = list(size = 15, color = "#2c7bb6", symbol = "square",
+                    line = list(color = "white", width = 2)),
+      name = sprintf("Max Sharpe (Sharpe=%.2f)", f$sr_v[f$ims])) |>
+    layout(
+      title  = list(text = titre, font = list(size = 13)),
+      xaxis  = list(title = "Volatilité annualisée (%)", gridcolor = "#f0f0f0"),
+      yaxis  = list(title = "Rendement annualisé (%)", gridcolor = "#f0f0f0"),
+      legend = list(orientation = "h", x = 0, y = -0.22, font = list(size = 11)),
+      hovermode = "closest", plot_bgcolor = "white", paper_bgcolor = "white"
+    )
+}
 
-# Points individuels pour comparaison
-ind_df <- data.frame(
-  Inst = NOMS[colnames(ptfl_w)],
-  Vol  = sqrt(diag(cov_m)) * 100,
-  Rdt  = mu_v * 100
-)
+frontier_recent <- run_frontier(ptfl_w)
+frontier_long   <- run_frontier(ptfl_w_long)
+```
 
-plot_ly() |>
-  # Nuage des 8 000 portefeuilles colorés par Sharpe
-  add_trace(x=vv*100, y=rv*100, type="scatter", mode="markers",
-    marker=list(size=3, color=sr_v,
-      colorscale=list(c(0,"#d7191c"),c(.5,"#fdae61"),c(1,"#1a9641")),
-      opacity=.40, showscale=TRUE,
-      colorbar=list(title="Sharpe",len=.55,y=.42)),
-    name="Portefeuilles simulés",
-    hovertemplate="Vol: %{x:.1f}%<br>Rdt: %{y:+.1f}%<extra></extra>") |>
-  # Instruments individuels
-  add_trace(data=ind_df, x=~Vol, y=~Rdt, type="scatter",
-    mode="markers+text", text=~Inst, textposition="top right",
-    marker=list(size=8, color="rgba(40,40,40,.75)", symbol="x",
-                line=list(color="black",width=1.5)),
-    name="Instruments seuls",
-    hovertemplate="%{text}<br>Vol: %{x:.1f}%<br>Rdt: %{y:+.1f}%<extra></extra>") |>
-  # Portefeuille Variance Minimale
-  add_trace(x=vv[imv]*100, y=rv[imv]*100, type="scatter", mode="markers",
-    marker=list(size=15,color="#d7191c",symbol="triangle-up",
-                line=list(color="white",width=2)),
-    name=sprintf("Min Variance (Sharpe=%.2f)",sr_v[imv])) |>
-  # Portefeuille Sharpe Maximal
-  add_trace(x=vv[ims]*100, y=rv[ims]*100, type="scatter", mode="markers",
-    marker=list(size=15,color="#2c7bb6",symbol="square",
-                line=list(color="white",width=2)),
-    name=sprintf("Max Sharpe (Sharpe=%.2f)",sr_v[ims])) |>
-  layout(
-    title  = list(text="Frontière efficiente — Monte Carlo (8 000 portefeuilles)",font=list(size=13)),
-    xaxis  = list(title="Volatilité annualisée (%)",gridcolor="#f0f0f0"),
-    yaxis  = list(title="Rendement annualisé (%)",gridcolor="#f0f0f0"),
-    legend = list(orientation="h",x=0,y=-0.22,font=list(size=11)),
-    hovermode="closest",plot_bgcolor="white",paper_bgcolor="white"
-  )
+```{r fig-frontier}
+#| fig-height: 7
+plot_frontier(frontier_recent,
+  sprintf("Frontière efficiente — univers complet (15 titres, %s–%s)",
+          format(PERIODE_COMMUNE_DEBUT,"%Y"), format(PERIODE_COMMUNE_FIN,"%Y")))
+```
+
+Cette première frontière porte sur les **15 instruments du catalogue**. Elle ne peut pas remonter avant `r format(PERIODE_COMMUNE_DEBUT,"%d/%m/%Y")`, date de cotation de `r fr_join(NOMS[tk_binding])` — faute de données antérieures pour ce(s) titre(s), aucun calcul simultané sur les 15 instruments n'est possible plus tôt. C'est cette version qui alimente les portefeuilles recommandés plus bas, puisqu'ils utilisent l'univers complet.
+
+## Frontière efficiente — longue période (2008–aujourd'hui)
+
+::: {.callout-note}
+Pour visualiser l'effet de la crise de 2008 et du krach Covid sur la diversification, cette seconde frontière est recalculée sur le **sous-univers des `r length(tk_long)` instruments cotés avant `r format(LONG_CUTOFF,"%Y")`** (tous, sauf `r fr_join(NOMS[tk_recent])`), sur la période **`r format(PERIODE_LONGUE_DEBUT,"%d/%m/%Y")` → `r format(PERIODE_LONGUE_FIN,"%d/%m/%Y")`**.
+:::
+
+```{r fig-frontier-long}
+#| fig-height: 7
+plot_frontier(frontier_long,
+  sprintf("Frontière efficiente — historique long (%d titres, %s–%s)",
+          length(tk_long), format(PERIODE_LONGUE_DEBUT,"%Y"), format(PERIODE_LONGUE_FIN,"%Y")))
 ```
 
 ## Pondérations des portefeuilles optimaux
@@ -1437,17 +1555,20 @@ plot_ly() |>
 ```{r tbl-optimal}
 #| fig-width: 11
 #| fig-height: 5
-nc_short <- NOMS[colnames(ptfl_w)]
+# Pondérations issues de la frontière "univers complet" (celle qui alimente
+# les portefeuilles recommandés, cf. section suivante).
+f        <- frontier_recent
+nc_short <- NOMS[f$tickers]
 
 build_opt_row <- function(idx, label) {
-  w  <- sw[idx, ]
+  w  <- f$sw[idx, ]
   # Conserver seulement les pondérations significatives (> 1 %)
   w_sig <- round(w * 100, 1)
   df <- data.frame(
     Portefeuille = label,
-    `Rdt ann.`   = sprintf("%+.1f%%", rv[idx]*100),
-    `Vol. ann.`  = sprintf("%.1f%%",  vv[idx]*100),
-    Sharpe       = round(sr_v[idx], 2),
+    `Rdt ann.`   = sprintf("%+.1f%%", f$rv[idx]*100),
+    `Vol. ann.`  = sprintf("%.1f%%",  f$vv[idx]*100),
+    Sharpe       = round(f$sr_v[idx], 2),
     check.names  = FALSE
   )
   for (j in seq_along(nc_short)) df[[nc_short[j]]] <- sprintf("%.1f%%", w_sig[j])
@@ -1455,8 +1576,8 @@ build_opt_row <- function(idx, label) {
 }
 
 tbl_opt <- rbind(
-  build_opt_row(imv, "📐 Variance Minimale"),
-  build_opt_row(ims, "🎯 Sharpe Maximal")
+  build_opt_row(f$imv, "📐 Variance Minimale"),
+  build_opt_row(f$ims, "🎯 Sharpe Maximal")
 )
 
 DT::datatable(tbl_opt, rownames=FALSE,
@@ -1471,13 +1592,13 @@ DT::datatable(tbl_opt, rownames=FALSE,
 #| fig-height: 5
 # Visualisation en barres des pondérations — plus lisible que la table
 wt_df <- do.call(rbind, lapply(list(
-    list(idx=imv, label="📐 Variance Minimale"),
-    list(idx=ims, label="🎯 Sharpe Maximal")
+    list(idx=f$imv, label="📐 Variance Minimale"),
+    list(idx=f$ims, label="🎯 Sharpe Maximal")
   ), function(x) {
     data.frame(
       Portefeuille = x$label,
       Instrument   = nc_short,
-      Poids        = round(sw[x$idx, ] * 100, 1)
+      Poids        = round(f$sw[x$idx, ] * 100, 1)
     )
   }
 ))
@@ -1651,13 +1772,13 @@ build_port_ret <- function(tks, wts) {
 }
 
 r_def <- build_port_ret(
-  c("CW8.PA","PUST.PA","SAN.PA","AI.PA","TTE.PA","SGLD.PA","BNP.PA"),
+  c("CW8.PA","PUST.PA","SAN.PA","AI.PA","TTE.PA","4GLD.DE","BNP.PA"),
   c(.30,.10,.15,.15,.10,.12,.08))
 r_equ <- build_port_ret(
-  c("CW8.PA","PANX.PA","PUST.PA","MC.PA","AI.PA","OR.PA","SGLD.PA","SAN.PA"),
+  c("CW8.PA","PANX.PA","PUST.PA","MC.PA","AI.PA","OR.PA","4GLD.DE","SAN.PA"),
   c(.30,.15,.10,.12,.10,.08,.10,.05))
 r_cro <- build_port_ret(
-  c("PANX.PA","CW8.PA","PUST.PA","PAEEM.PA","MC.PA","DSY.PA","SGLD.PA"),
+  c("PANX.PA","CW8.PA","PUST.PA","PAEEM.PA","MC.PA","DSY.PA","4GLD.DE"),
   c(.30,.20,.10,.08,.12,.08,.07))
 r_ref <- as.numeric(ptfl_w[,"CW8.PA"])  # Référence : CW8
 
