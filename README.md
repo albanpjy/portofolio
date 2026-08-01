@@ -2,7 +2,7 @@
 
 Rapport quantitatif complet d'analyse et d'optimisation de portefeuille, construit en **R / Quarto**, appliqué à 15 instruments (ETF + actions françaises).
 
-**[👉 Voir le rapport complet en ligne](../../)** *(lien GitHub Pages activé après publication)*
+**[👉 Voir le rapport complet en ligne](https://albanpjy.github.io/portofolio/)**
 
 ---
 
